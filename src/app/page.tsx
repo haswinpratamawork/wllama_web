@@ -1,7 +1,9 @@
 'use client';
 
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Play, Loader2, Send, Trash2, User, Bot, Download, Save, Plus, MessageSquare, Menu, X, Globe, HardDrive } from 'lucide-react';
+import { Upload, Play, Loader2, Send, Trash2, User, Bot, Download, Save, Plus, MessageSquare, Menu, X, Globe, HardDrive, FileStack, Database } from 'lucide-react';
+import SplitModelLoader from './split-model';
+import Link from 'next/link';
 
 interface ProgressCallback {
   loaded: number;
@@ -58,7 +60,7 @@ export default function WllamaUI() {
   const [showModelManager, setShowModelManager] = useState(false);
   const [modelUrl, setModelUrl] = useState('');
   const [cachedModels, setCachedModels] = useState<CachedModel[]>([]);
-  const [loadMethod, setLoadMethod] = useState<'url' | 'file'>('url');
+  const [loadMethod, setLoadMethod] = useState<'url' | 'file' | 'split'>('url');
   const [modelFile, setModelFile] = useState<FileList | null>(null);
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [selectedFile, setSelectedFile] = useState<string>('');
@@ -298,8 +300,10 @@ export default function WllamaUI() {
     }
   };
 
-  const loadModelFromFile = async () => {
-    if (!modelFile) {
+  const loadModelFromFile = async (blobs?: File[]) => {
+    const filesToLoad = blobs || (modelFile ? Array.from(modelFile) : null);
+    
+    if (!filesToLoad) {
       setError('Please select a model file first');
       return;
     }
@@ -329,19 +333,18 @@ export default function WllamaUI() {
       setStatus('Loading model from files...');
 
       const start = Date.now();
-      const blobs = Array.from(modelFile);
 
       const config: WllamaConfig = {
         n_ctx: nCtx,
         n_batch: 2048,
-        n_threads: 8,
+        n_threads: navigator.hardwareConcurrency || 8,
         n_gpu_layers: 0,
         use_mlock: false,
         use_mmap: true,
         progressCallback,
       };
 
-      await wllamaRef.current.loadModel(blobs, config);
+      await wllamaRef.current.loadModel(filesToLoad, config);
 
       const took = Date.now() - start;
       setStatus(`Model loaded successfully! (${took} ms)`);
@@ -613,11 +616,17 @@ export default function WllamaUI() {
           </button>
           <button
             onClick={() => setShowModelManager(true)}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
           >
             <HardDrive className="w-4 h-4" />
             Manage models
           </button>
+          <Link href="/embedding">
+            <button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2">
+              <Database className="w-4 h-4" />
+              Vector Embeddings
+            </button>
+          </Link>
         </div>
 
         <div className="flex-1 overflow-y-auto p-2">
@@ -689,6 +698,16 @@ export default function WllamaUI() {
                 >
                   <Upload className="w-4 h-4" />
                   From File
+                </button>
+                <button
+                  onClick={() => setLoadMethod('split')}
+                  className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${loadMethod === 'split'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                    }`}
+                >
+                  <FileStack className="w-4 h-4" />
+                  Split Model
                 </button>
               </div>
 
@@ -790,7 +809,7 @@ export default function WllamaUI() {
                     </p>
                   )}
                   <button
-                    onClick={loadModelFromFile}
+                    onClick={() => loadModelFromFile()}
                     disabled={!modelFile || isLoading}
                     className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                   >
@@ -807,6 +826,15 @@ export default function WllamaUI() {
                     )}
                   </button>
                 </div>
+              )}
+
+              {/* Load Split Model */}
+              {loadMethod === 'split' && (
+                <SplitModelLoader
+                  onLoadModel={loadModelFromFile}
+                  isLoading={isLoading}
+                  nCtx={nCtx}
+                />
               )}
 
               {/* Context Size Setting */}

@@ -19,6 +19,30 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+
+  webpack: (config, { isServer }) => {
+    // Fixes for @xenova/transformers
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      'sharp$': false,
+      'onnxruntime-node$': false,
+    };
+    
+    // Add fallbacks for node modules
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+        crypto: false,
+      };
+    }
+
+    return config;
+  },
+  experimental: {
+    serverComponentsExternalPackages: ['@xenova/transformers'],
+  },
 };
 
 export default nextConfig;
