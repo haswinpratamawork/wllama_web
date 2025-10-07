@@ -8,9 +8,12 @@ import { faStop } from '@fortawesome/free-solid-svg-icons';
 import { nl2br } from '../utils/nl2br';
 import ScreenWrapper from './ScreenWrapper';
 import { useIntervalWhen } from '../utils/use-interval-when';
+import { useRag, type RagSearchHit } from '../utils/rag.context';
 
 export default function ChatScreen() {
   const [input, setInput] = useState('');
+  const [ragContext, setRagContext] = useState<RagSearchHit[]>([]);
+  const [ragNotice, setRagNotice] = useState<string | null>(null);
   const {
     currentConvId,
     isGenerating,
@@ -26,6 +29,7 @@ export default function ChatScreen() {
     editMessageInConversation,
     newConversation,
   } = useMessages();
+  const { ragEnabled, toggleRag, searchByText } = useRag();
 
   useIntervalWhen(chatScrollToBottom, 500, isGenerating, true);
 
@@ -38,13 +42,16 @@ export default function ChatScreen() {
     const currHistory = currConv?.messages ?? [];
     const userInput = input;
     setInput('');
+    setRagContext([]);
+    setRagNotice(null);
+    const baseId = Date.now();
     const userMsg: Message = {
-      id: Date.now(),
+      id: baseId,
       content: userInput,
       role: 'user',
     };
     const assistantMsg: Message = {
-      id: Date.now() + 1,
+      id: baseId + 1,
       content: '',
       role: 'assistant',
     };
@@ -68,23 +75,53 @@ export default function ChatScreen() {
       throw new Error('loadedModel is null');
     }
     let formattedChat: string;
-    console.log("userMsg", userMsg)
-    console.log("assistantMsg", assistantMsg)
+    let messagesForModel: Message[] = [...currHistory, userMsg];
 
     try {
-      formattedChat = await formatChat(getWllamaInstance(), [
-        ...currHistory,
-        userMsg,
-      ]);
+      if (ragEnabled) {
+        try {
+          const hits = await searchByText(userInput, { topK: 5 });
+          if (hits.length) {
+            setRagContext(hits);
+            setRagNotice(
+              `RAG aktif: menambahkan ${hits.length} knowledge ke prompt`
+            );
+            const knowledgeBlocks = hits
+              .map((hit, index) => {
+                const urlLine = hit.item.url ? `Sumber: ${hit.item.url}\n` : '';
+                return `### Knowledge ${index + 1}\nJudul: ${hit.item.title
+                  }\n${urlLine}Konten:\n${hit.item.content}`;
+              })
+              .join('\n\n');
+            const systemMsg: Message = {
+              id: baseId - 1,
+              role: 'system',
+              content: `Gunakan knowledge berikut sebagai konteks saat menjawab. Jika tidak relevan, abaikan dengan sopan.\n\n${knowledgeBlocks}`,
+            };
+            messagesForModel = [systemMsg, ...currHistory, userMsg];
+          } else {
+            setRagNotice('RAG aktif tetapi tidak ada knowledge yang relevan.');
+          }
+        } catch (err: any) {
+          console.error(err);
+          setRagNotice(
+            'RAG dinonaktifkan untuk prompt ini: ' +
+            (err?.message ?? String(err))
+          );
+          messagesForModel = [...currHistory, userMsg];
+        }
+      }
+      formattedChat = await formatChat(getWllamaInstance(), messagesForModel);
+      console.log("formattedChat", formattedChat)
     } catch (e) {
       alert(`Error while formatting chat: ${(e as any)?.message ?? 'unknown'}`);
       throw e;
     }
-    console.log({ formattedChat });
     await createCompletion(formattedChat, (newContent) => {
+      // console.log("masukk", convId, assistantMsg.id, newContent)
       editMessageInConversation(convId, assistantMsg.id, newContent);
     });
-    
+
   };
 
   return (
@@ -116,6 +153,43 @@ export default function ChatScreen() {
         )}
       </div>
       <div className="flex flex-col input-message py-4">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 text-sm text-base-content/70 mb-2">
+          <label className="inline-flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="toggle toggle-xs"
+              checked={ragEnabled}
+              onChange={(e) => toggleRag(e.target.checked)}
+            />
+            <span>Gunakan knowledge base (RAG)</span>
+          </label>
+          {ragNotice && <span className="text-xs md:text-sm">{ragNotice}</span>}
+        </div>
+        {ragContext.length > 0 && (
+          <div className="mb-3 bg-base-100/70 border border-base-200 rounded-lg p-3 text-xs space-y-2 max-h-40 overflow-auto">
+            <div className="font-semibold text-base-content">
+              Konteks yang digunakan:
+            </div>
+            {ragContext.slice(0, 3).map((hit) => (
+              <div key={hit.item.id} className="space-y-1">
+                <div className="font-medium text-base-content/90">
+                  {hit.item.title}{' '}
+                  <span className="text-[0.7rem] opacity-70">
+                    (score {hit.score.toFixed(3)})
+                  </span>
+                </div>
+                <div className="text-[0.7rem] text-base-content/70 line-clamp-3">
+                  {hit.item.content}
+                </div>
+                {hit.item.url && (
+                  <div className="text-[0.7rem] text-info">
+                    {hit.item.url}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {isGenerating && (
           <div className="text-center">
             <button
