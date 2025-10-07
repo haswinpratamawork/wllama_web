@@ -15,6 +15,7 @@ import {
   getUserAddedModels,
   updateUserAddedModels,
 } from './displayed-model';
+import { storeLocalModelFiles } from './local-model-cache';
 
 interface WllamaContextValue {
   // functions for managing models
@@ -81,8 +82,10 @@ export const WllamaProvider = ({ children }: any) => {
   >({});
   const [loadedModel, setLoadedModel] = useState<DisplayedModel>();
 
-  const refreshCachedModels = async () => {
-    setCachedModels(await modelManager.getModels());
+  const refreshCachedModels = async (): Promise<Model[]> => {
+    const list = await modelManager.getModels();
+    setCachedModels(list);
+    return list;
   };
   useDidMount(refreshCachedModels);
 
@@ -188,168 +191,67 @@ export const WllamaProvider = ({ children }: any) => {
     }
   };
 
-  const handleAddLocalModel = async (files: FileList | File[]): Promise<void> => {
+  const handleAddLocalModel = async (
+    files: FileList | File[]
+  ): Promise<void> => {
     setBusy(true);
     try {
-      const inst = wllamaInstance;
-      const fileArr = Array.isArray(files) ? files : Array.from(files);
-      if (fileArr.length === 0) throw new Error('Tidak ada file yang dipilih');
+      const fileArr = Array.isArray(files) ? Array.from(files) : [...files];
+      if (fileArr.length === 0) {
+        throw new Error('Tidak ada file yang dipilih');
+      }
 
-      // Validasi dasar
-      for (const f of fileArr) {
-        if (!f.name.toLowerCase().endsWith('.gguf')) {
+      for (const file of fileArr) {
+        if (!file.name.toLowerCase().endsWith('.gguf')) {
           throw new Error('Hanya file .gguf yang didukung');
         }
-        if (f.size === 0) throw new Error('File model tidak boleh kosong');
+        if (file.size === 0) {
+          throw new Error('File model tidak boleh kosong');
+        }
       }
 
-      // 1) Load model ke memory agar langsung bisa dipakai untuk inference
-      const blobs: Blob[] = fileArr as Blob[];
-      console.info('Loading model into wllama memory (in-memory only)...');
-      await inst.loadModel(blobs, {
-        n_ctx: currParams.nContext,
-        n_threads: currParams.nThreads,
-        n_batch: currParams.nBatch,
-        embeddings: false,
+      const { modelUrl, totalSize, baseName } = await storeLocalModelFiles(
+        fileArr,
+        modelManager
+      );
+      const updatedModels = await refreshCachedModels();
+      let cachedModel = updatedModels.find((m) => m.url === modelUrl);
+      if (!cachedModel) {
+        const available = await modelManager.getModels({
+          includeInvalid: true,
+        });
+        cachedModel = available.find((m) => m.url === modelUrl);
+      }
+
+      const displayed = new DisplayedModel(
+        modelUrl,
+        totalSize,
+        true,
+        cachedModel,
+        {
+          name: baseName,
+          source: 'local',
+          addedAt: Date.now(),
+        }
+      );
+
+      const userAddedModels = getUserAddedModels(updatedModels).filter(
+        (m) => m.url !== modelUrl
+      );
+      updateUserAddedModels([...userAddedModels, displayed]);
+
+      setLoadedModel((prev) => {
+        if (prev && prev.url === modelUrl) {
+          return displayed.clone({
+            state: prev.state,
+            cachedModel,
+          });
+        }
+        return prev;
       });
-      console.info('wllama.loadModel finished (model loaded in-memory).');
-
-      // 2) Buat URL lokal unik untuk UI referensi
-      const baseName = (fileArr[0] as File).name;
-      const url = `local://${Date.now()}/${baseName}`;
-
-      // 3) Coba simpan ke cache jika cacheManager punya API (best-effort)
-      const mmAny: any = modelManager as any;
-      const cacheAny: any = mmAny?.cacheManager;
-      console.debug('CacheManager methods:', cacheAny ? Object.keys(cacheAny) : 'no-cache-manager');
-
-      let savedFiles: any[] | undefined = undefined;
-      let modelInstance: any = undefined;
-      let savedToCache = false;
-
-      if (cacheAny && Object.keys(cacheAny).length > 0) {
-        try {
-          // Coba beberapa method yang mungkin ada (save / put / addFile / add)
-          if (typeof cacheAny.save === 'function') {
-            try {
-              savedFiles = await cacheAny.save(url, blobs);
-              savedToCache = true;
-            } catch (e) {
-              // fallback signature: array of {name, blob}
-              const entries = blobs.map((b: Blob, i: number) => ({
-                name: i === 0 ? baseName : `model-${i}.gguf`,
-                blob: b,
-              }));
-              savedFiles = await cacheAny.save(url, entries);
-              savedToCache = true;
-            }
-          }
-
-          if (!savedToCache && typeof cacheAny.put === 'function') {
-            try {
-              savedFiles = await cacheAny.put(url, blobs);
-              savedToCache = true;
-            } catch (_) {
-              // try per-file put(url, name, blob)
-              const arr: any[] = [];
-              for (let i = 0; i < blobs.length; ++i) {
-                const fname = i === 0 ? baseName : `model-${i}.gguf`;
-                const r = await cacheAny.put(url, fname, blobs[i]);
-                arr.push(r);
-              }
-              savedFiles = arr;
-              savedToCache = true;
-            }
-          }
-
-          if (!savedToCache && typeof cacheAny.addFile === 'function') {
-            savedFiles = [];
-            for (let i = 0; i < blobs.length; ++i) {
-              const fname = i === 0 ? baseName : `model-${i}.gguf`;
-              const r = await cacheAny.addFile(url, fname, blobs[i]);
-              savedFiles.push(r);
-            }
-            savedToCache = true;
-          }
-
-          if (!savedToCache && typeof cacheAny.add === 'function') {
-            const entries = blobs.map((b: Blob, i: number) => ({ name: i === 0 ? baseName : `model-${i}.gguf`, blob: b }));
-            savedFiles = await cacheAny.add(url, entries);
-            savedToCache = true;
-          }
-        } catch (cacheErr) {
-          console.warn('Gagal menyimpan ke cacheManager (ignored):', cacheErr);
-          savedToCache = false;
-          savedFiles = undefined;
-        }
-      } else {
-        console.info('Tidak ada cacheManager / cache methods kosong — akan memakai in-memory only (no persist).');
-      }
-
-      // 4) HANYA bila kita berhasil menyimpan ke cache, coba dapatkan Model dari modelManager
-      if (savedToCache) {
-        try {
-          if (typeof mmAny.getModelOrDownload === 'function') {
-            // Jangan memanggil getModelOrDownload untuk schema local:// jika implementasi
-            // library melakukan fetch(url). Namun karena kita baru saja menyimpan ke cache,
-            // getModelOrDownload mungkin mengembalikan Model langsung.
-            modelInstance = await mmAny.getModelOrDownload(url, { useCache: true });
-          } else {
-            // Sebagai fallback coba buat Model dengan constructor jika tersedia
-            const maybeModelCtor = mmAny.Model ?? (await import('@wllama/wllama')).Model;
-            if (maybeModelCtor) {
-              modelInstance = new maybeModelCtor(modelManager, url, savedFiles);
-            }
-          }
-          console.info('Model instance obtained from modelManager/cache.');
-        } catch (e) {
-          console.warn('Gagal membuat Model instance meski savedFiles ada — fallback ke in-memory only:', e);
-          modelInstance = undefined;
-        }
-      } else {
-        // Important: JANGAN panggil getModelOrDownload/new Model(...) karena itu akan mencoba fetch local:// dan gagal.
-        console.info('Skip creating Model instance because model was NOT saved to cache — using in-memory only.');
-      }
-
-      // 5) refresh cachedModels jika tersedia
-      try {
-        if (typeof modelManager.getModels === 'function') {
-          setCachedModels(await modelManager.getModels());
-        }
-      } catch (e) {
-        console.warn('refreshCachedModels gagal:', e);
-      }
-
-      // 6) Set loaded model (DisplayedModel) sehingga UI dan runtime tahu model siap (in-memory)
-      const totalSize = (fileArr as File[]).reduce((s, f) => s + f.size, 0);
-
-
-      const displayed = new DisplayedModel(url, totalSize, true, modelInstance);
-      displayed.state = ModelState.LOADED;
-      setLoadedModel(displayed);
-
-
-      const userAddedModels = getUserAddedModels(cachedModels);
-
-      // baru: daftarkan metadata model ke daftar models yang ditambahkan user
-      try {
-        updateUserAddedModels([
-          ...userAddedModels,
-          new DisplayedModel(url, totalSize, true, modelInstance)
-        ]);
-      } catch (err) {
-        console.warn('updateUserAddedModels failed:', err);
-      }
-      // 7) Update runtime info
-      setCurrRuntimeInfo({
-        isMultithread: inst.isMultithread(),
-        hasChatTemplate: !!inst.getChatTemplate(),
-      });
-
-      console.info(`Model loaded in-memory and set as loaded. persisted=${savedToCache}, url=${url}`);
+      setCurrRuntimeInfo((prev) => prev);
     } catch (e: any) {
       alert('Gagal load model lokal: ' + (e?.message ?? String(e)));
-      setLoadedModel(undefined);
     } finally {
       setBusy(false);
     }
@@ -416,10 +318,19 @@ export const WllamaProvider = ({ children }: any) => {
         throw new Error('Model with the same URL already exist');
       }
       const userAddedModels = getUserAddedModels(cachedModels);
-      updateUserAddedModels([
-        ...userAddedModels,
-        new DisplayedModel(custom.url, custom.size, true, undefined),
-      ]);
+      const entry = new DisplayedModel(
+        custom.url,
+        custom.size,
+        true,
+        undefined,
+        {
+          name: custom.displayName,
+          source: 'huggingface',
+          addedAt: Date.now(),
+        }
+      );
+      const filtered = userAddedModels.filter((m) => m.url !== entry.url);
+      updateUserAddedModels([...filtered, entry]);
       await refreshCachedModels();
     } catch (e) {
       setBusy(false);

@@ -12,7 +12,12 @@ export const useDidMount = (callback: () => any) =>
     callback();
   }, []);
 
-type StorageKey = 'conversations' | 'params' | 'welcome' | 'custom_models';
+type StorageKey =
+  | 'conversations'
+  | 'params'
+  | 'welcome'
+  | 'custom_models'
+  | 'embedding_model';
 
 export const WllamaStorage = {
   save<T>(key: StorageKey, data: T) {
@@ -24,6 +29,9 @@ export const WllamaStorage = {
     } else {
       return defaultValue;
     }
+  },
+  remove(key: StorageKey) {
+    localStorage.removeItem(key);
   },
 };
 

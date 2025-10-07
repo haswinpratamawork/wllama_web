@@ -24,7 +24,9 @@ export async function verifyCustomModel(url: string): Promise<DisplayedModel> {
     throw new Error(`Fetch error with status code = ${response.status}`);
   }
 
-  return new DisplayedModel(_url, await getModelSize(_url), true, undefined);
+  return new DisplayedModel(_url, await getModelSize(_url), true, undefined, {
+    source: 'huggingface',
+  });
 }
 
 const checkBuffer = (buffer: Uint8Array, header: Uint8Array) => {

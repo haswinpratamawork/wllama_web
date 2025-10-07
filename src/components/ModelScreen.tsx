@@ -317,10 +317,10 @@ function ModelCard({
     >
       <div className="card-body p-4 flex flex-row">
         <div className="grow">
-          <b>{m.hfPath.replace(/-\d{5}-of-\d{5}/, '-(shards)')}</b>
+          <b>{m.displayName}</b>
           <br />
           <small>
-            HF repo: {m.hfModel}
+            {m.displaySource}
             <br />
             Size: {toHumanReadableSize(m.size)}
             {m.size > MAX_GGUF_SIZE && (

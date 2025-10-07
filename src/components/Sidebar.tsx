@@ -77,7 +77,7 @@ export default function Sidebar({ children }: { children: any }) {
 
             {loadedModel && (
               <div className="text-sm px-4 pb-2">
-                Model: {loadedModel.hfModel}
+                Model: {loadedModel.displayName}
               </div>
             )}
 
