@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Database, Upload, Search, Trash2, Download, Loader2, FileText, Zap, Home, AlertCircle, Play, Globe } from 'lucide-react';
-import Link from 'next/link';
 
 interface EmbeddingDocument {
   id: string;
@@ -20,9 +19,33 @@ interface SearchResult {
 }
 
 interface Wllama {
-  loadModelFromUrl: (url: string, config: any) => Promise<void>;
-  loadModel: (blobs: File[], config: any) => Promise<void>;
+  loadModel: (blobs: Blob[], config: any) => Promise<void>;
   createEmbedding: (text: string, options?: { skipBOS?: boolean; skipEOS?: boolean }) => Promise<number[]>;
+  getModelMetadata: () => ModelMetadata;
+  getLoadedContextInfo: () => LoadedContextInfo;
+}
+
+interface ModelMetadata {
+  hparams: {
+    nVocab: number;
+    nCtxTrain: number;
+    nEmbd: number;
+    nLayer: number;
+  };
+  meta: Record<string, string>;
+}
+
+interface LoadedContextInfo {
+  n_ctx: number;
+  n_batch: number;
+  n_ubatch: number;
+  n_embd: number;
+}
+
+interface CachedModel {
+  url: string;
+  size: number;
+  name: string;
 }
 
 export default function EmbeddingPage() {
@@ -38,11 +61,20 @@ export default function EmbeddingPage() {
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
   const [dbReady, setDbReady] = useState(false);
-  const [loadMethod, setLoadMethod] = useState<'url' | 'file'>('url');
-  const [modelUrl, setModelUrl] = useState('');
+  const [loadMethod, setLoadMethod] = useState<'url' | 'file' | 'cached'>('url');
+  const [modelUrl, setModelUrl] = useState('https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf');
   const [modelFiles, setModelFiles] = useState<FileList | null>(null);
+  const [cachedModels, setCachedModels] = useState<CachedModel[]>([]);
+  const [selectedCachedModel, setSelectedCachedModel] = useState('');
+  const [modelCapabilities, setModelCapabilities] = useState<{
+    n_ctx_train: number;
+    n_embd: number;
+    n_vocab: number;
+    model_type: string;
+  } | null>(null);
   
   const wllamaRef = useRef<Wllama | null>(null);
+  const modelManagerRef = useRef<any>(null);
   const dbRef = useRef<IDBDatabase | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -71,6 +103,7 @@ export default function EmbeddingPage() {
     };
 
     initDB();
+    loadCachedModels();
 
     return () => {
       if (dbRef.current) {
@@ -121,7 +154,42 @@ export default function EmbeddingPage() {
     });
   };
 
-  // Load embedding model from URL
+  // Load cached models using ModelManager
+  const loadCachedModels = async () => {
+    try {
+      const WllamaModule = await import('@wllama/wllama/esm/index.js');
+      const { ModelManager } = WllamaModule;
+      if (!modelManagerRef.current) {
+        modelManagerRef.current = new ModelManager();
+      }
+      const models = await modelManagerRef.current.getModels();
+      setCachedModels(models.map((m: any) => ({
+        url: m.url,
+        size: m.size,
+        name: m.url.split('/').pop()?.replace('.gguf', '') || 'Unknown'
+      })));
+    } catch (err) {
+      console.error('Failed to load cached models:', err);
+    }
+  };
+
+  // Delete cached model
+  const deleteCachedModel = async (url: string) => {
+    try {
+      const models = await modelManagerRef.current.getModels();
+      const model = models.find((m: any) => m.url === url);
+      if (model) {
+        await model.remove();
+        await loadCachedModels();
+        setStatus('Model deleted from cache');
+        setTimeout(() => setStatus(''), 3000);
+      }
+    } catch (err: any) {
+      setError('Failed to delete model: ' + (err?.message || String(err)));
+    }
+  };
+
+  // Load embedding model using optimized approach
   const loadModelFromUrl = async () => {
     if (!modelUrl.trim()) {
       setError('Please enter a model URL');
@@ -135,7 +203,7 @@ export default function EmbeddingPage() {
 
     try {
       const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const Wllama = WllamaModule.Wllama;
+      const { Wllama, ModelManager } = WllamaModule;
 
       const CONFIG_PATHS = {
         'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
@@ -143,36 +211,94 @@ export default function EmbeddingPage() {
       };
 
       wllamaRef.current = new Wllama(CONFIG_PATHS);
+      
+      if (!modelManagerRef.current) {
+        modelManagerRef.current = new ModelManager();
+      }
 
-      const progressCallback = ({ loaded, total }: { loaded: number; total: number }) => {
-        const progressPercentage = Math.round((loaded / total) * 100);
-        setLoadProgress(progressPercentage);
-        setStatus(`Loading model... ${progressPercentage}%`);
-      };
+      setStatus('Downloading/loading model...');
 
-      setStatus('Downloading model...');
+      // Use ModelManager to handle download and caching
+      const model = await modelManagerRef.current.getModelOrDownload(modelUrl, {
+        progressCallback: ({ loaded, total }: { loaded: number; total: number }) => {
+          if (total) {
+            const progressPercentage = Math.round((loaded / total) * 100);
+            setLoadProgress(progressPercentage);
+            setStatus(`Downloading model... ${progressPercentage}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)`);
+          }
+        },
+      });
 
-      const config = {
+      setStatus('Opening model blobs...');
+      const blobs = await model.open();
+
+      setStatus('Loading model into runtime...');
+      
+      // Optimized config - simpler is better for large models
+      await wllamaRef.current.loadModel(blobs, {
         embeddings: true,
-        n_ctx: 1024,
-        n_batch: 1024,
-        n_ubatch: 1024,
+        n_ctx: 2048,
         pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
-        progressCallback,
-      };
+      });
 
-      await wllamaRef.current.loadModelFromUrl(modelUrl, config);
-
-      setStatus('Model loaded successfully!');
+      setStatus('Reading model capabilities...');
+      const metadata = wllamaRef.current.getModelMetadata();
+      const contextInfo = wllamaRef.current.getLoadedContextInfo();
+      
+      setModelCapabilities({
+        n_ctx_train: metadata.hparams.nCtxTrain,
+        n_embd: metadata.hparams.nEmbd,
+        n_vocab: metadata.hparams.nVocab,
+        model_type: metadata.meta['general.architecture'] || 'unknown',
+      });
+      
+      const modelName = modelUrl.split('/').pop() || 'model';
+      setStatus(
+        `✓ Model loaded! ${modelName} - Context: ${contextInfo.n_ctx} tokens, ` +
+        `Embedding: ${metadata.hparams.nEmbd}D`
+      );
+      
       setLoadProgress(100);
       setModelLoaded(true);
+      await loadCachedModels();
     } catch (err: any) {
-      setError('Failed to load model: ' + (err?.message || String(err)));
+      const errorMsg = err?.message || String(err);
+      
+      if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
+        setError(
+          '⚠️ Model too large for browser memory. Try:\n' +
+          '1. Close other tabs to free memory\n' +
+          '2. Use a smaller quantization (Q4_K_M, Q3_K_M)\n' +
+          '3. Restart your browser\n' +
+          '4. Try a different browser (Chrome/Edge recommended)'
+        );
+      } else if (errorMsg.includes('unknown model architecture')) {
+        const arch = errorMsg.match(/unknown model architecture: '([^']+)'/)?.[1];
+        setError(
+          `⚠️ Architecture '${arch}' not supported. Use BERT, LLAMA, or Gemma-based embedding models.`
+        );
+      } else if (errorMsg.includes('out of memory') || errorMsg.includes('OOM')) {
+        setError(
+          '⚠️ Out of memory. Close other applications and tabs, then try again.'
+        );
+      } else {
+        setError('Failed to load model: ' + errorMsg);
+      }
       setStatus('');
       console.error(err);
     } finally {
       setLoadingModel(false);
     }
+  };
+
+  // Load from cached model
+  const loadCachedModel = async () => {
+    if (!selectedCachedModel) {
+      setError('Please select a cached model');
+      return;
+    }
+    setModelUrl(selectedCachedModel);
+    await loadModelFromUrl();
   };
 
   // Load embedding model from files
@@ -198,27 +324,33 @@ export default function EmbeddingPage() {
 
       wllamaRef.current = new Wllama(CONFIG_PATHS);
 
-      const progressCallback = ({ loaded, total }: { loaded: number; total: number }) => {
-        const progressPercentage = Math.round((loaded / total) * 100);
-        setLoadProgress(progressPercentage);
-        setStatus(`Loading model... ${progressPercentage}%`);
-      };
-
       setStatus('Loading model from files...');
 
-      const config = {
-        embeddings: true,
-        n_ctx: 1024,
-        n_batch: 1024,
-        n_ubatch: 1024,
-        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
-        progressCallback,
-      };
-
       const blobs = Array.from(modelFiles);
-      await wllamaRef.current.loadModel(blobs, config);
+      
+      // Optimized config
+      await wllamaRef.current.loadModel(blobs, {
+        embeddings: true,
+        n_ctx: 2048,
+        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
+      });
 
-      setStatus('Model loaded successfully!');
+      setStatus('Reading model capabilities...');
+      const metadata = wllamaRef.current.getModelMetadata();
+      const contextInfo = wllamaRef.current.getLoadedContextInfo();
+      
+      setModelCapabilities({
+        n_ctx_train: metadata.hparams.nCtxTrain,
+        n_embd: metadata.hparams.nEmbd,
+        n_vocab: metadata.hparams.nVocab,
+        model_type: metadata.meta['general.architecture'] || 'unknown',
+      });
+      
+      setStatus(
+        `✓ Local model loaded! Context: ${contextInfo.n_ctx} tokens, ` +
+        `Embedding: ${metadata.hparams.nEmbd}D`
+      );
+      
       setLoadProgress(100);
       setModelLoaded(true);
     } catch (err: any) {
@@ -230,18 +362,17 @@ export default function EmbeddingPage() {
     }
   };
 
-  // Generate embedding using Wllama
   const generateEmbedding = async (text: string): Promise<number[]> => {
     if (!wllamaRef.current) {
       throw new Error('Model not loaded');
     }
-
-    // Use Wllama's createEmbedding method
-    const embedding = await wllamaRef.current.createEmbedding(text);
+    const embedding = await wllamaRef.current.createEmbedding(text, {
+      skipBOS: true,
+      skipEOS: true,
+    });
     return embedding;
   };
 
-  // Cosine similarity
   const cosineSimilarity = (a: number[], b: number[]): number => {
     let dotProduct = 0;
     let normA = 0;
@@ -256,7 +387,6 @@ export default function EmbeddingPage() {
     return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   };
 
-  // Add document
   const handleAddDocument = async () => {
     if (!inputText.trim()) {
       setError('Please enter some text');
@@ -272,12 +402,13 @@ export default function EmbeddingPage() {
     setError('');
 
     try {
+      setStatus('Creating embedding...');
       const embedding = await generateEmbedding(inputText);
       
       const doc: EmbeddingDocument = {
-        id: Date.now().toString(),
+        id: `${Date.now()}`,
         text: inputText,
-        embedding,
+        embedding: embedding,
         metadata: {
           timestamp: Date.now(),
         },
@@ -286,14 +417,16 @@ export default function EmbeddingPage() {
       await saveDocumentToDB(doc);
       setDocuments(prev => [...prev, doc]);
       setInputText('');
+      setStatus('Document added successfully');
+      setTimeout(() => setStatus(''), 3000);
     } catch (err: any) {
       setError('Failed to embed text: ' + (err?.message || String(err)));
+      setStatus('');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Search documents
   const handleSearch = async () => {
     if (!searchQuery.trim()) {
       setError('Please enter a search query');
@@ -391,7 +524,6 @@ export default function EmbeddingPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 p-6">
       <div className="max-w-6xl mx-auto">
-        {/* Header */}
         <div className="mb-8 flex items-center justify-between">
           <div>
             <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
@@ -400,12 +532,12 @@ export default function EmbeddingPage() {
             </h1>
             <p className="text-blue-200">Wllama-powered text embedding with semantic search</p>
           </div>
-          <Link href="/">
+          <a href="/">
             <button className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2">
               <Home className="w-4 h-4" />
               Back to Chat
             </button>
-          </Link>
+          </a>
         </div>
 
         {/* Model Loader */}
@@ -417,13 +549,16 @@ export default function EmbeddingPage() {
 
           <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
             <p className="text-blue-200 text-sm mb-2">
-              <strong>Recommended Embedding Models (GGUF):</strong>
+              <strong>✅ Now supports larger models (up to 500MB+)!</strong>
             </p>
-            <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside">
-              <li><a href="https://huggingface.co/CompendiumLabs/bge-base-en-v1.5-gguf" target="_blank" className="underline">bge-base-en-v1.5-q4_k_m.gguf</a> (recommended, 85MB)</li>
-              <li><a href="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF" target="_blank" className="underline">nomic-embed-text-v1.5</a> (small, fast)</li>
-              <li>Use embedding models only - NOT chat models!</li>
+            <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside mb-2">
+              <li><strong>Small models (under 150MB):</strong> bge-base-en-v1.5-q4_k_m.gguf (85MB)</li>
+              <li><strong>Medium models (150-300MB):</strong> nomic-embed-text-v1.5-Q8_0.gguf</li>
+              <li><strong>Large models (300MB+):</strong> embeddinggemma-300M-Q8_0.gguf (default)</li>
             </ul>
+            <p className="text-green-200 text-xs mt-2">
+              💡 <strong>Optimized loading:</strong> Uses ModelManager with blob loading for better memory efficiency
+            </p>
           </div>
 
           {/* Load Method Tabs */}
@@ -449,6 +584,17 @@ export default function EmbeddingPage() {
             >
               <Upload className="w-4 h-4" />
               From File
+            </button>
+            <button
+              onClick={() => setLoadMethod('cached')}
+              className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                loadMethod === 'cached'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-white/10 text-blue-200 hover:bg-white/20'
+              }`}
+            >
+              <Database className="w-4 h-4" />
+              Cached ({cachedModels.length})
             </button>
           </div>
 
@@ -524,6 +670,60 @@ export default function EmbeddingPage() {
             </div>
           )}
 
+          {/* Load from Cached */}
+          {loadMethod === 'cached' && (
+            <div className="space-y-3">
+              {cachedModels.length === 0 ? (
+                <p className="text-blue-200 text-sm text-center py-4">
+                  No cached models. Download one first using URL or File method.
+                </p>
+              ) : (
+                <>
+                  <select
+                    value={selectedCachedModel}
+                    onChange={(e) => setSelectedCachedModel(e.target.value)}
+                    className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Select a cached model...</option>
+                    {cachedModels.map((model) => (
+                      <option key={model.url} value={model.url}>
+                        {model.name} ({(model.size / 1024 / 1024).toFixed(1)} MB)
+                      </option>
+                    ))}
+                  </select>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={loadCachedModel}
+                      disabled={!selectedCachedModel || loadingModel || modelLoaded}
+                      className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      {loadingModel ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          Loading... {loadProgress}%
+                        </>
+                      ) : modelLoaded ? (
+                        '✓ Model Loaded'
+                      ) : (
+                        <>
+                          <Play className="w-5 h-5" />
+                          Load Cached Model
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => selectedCachedModel && deleteCachedModel(selectedCachedModel)}
+                      disabled={!selectedCachedModel || loadingModel}
+                      className="bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {status && (
             <p className="text-blue-300 text-sm mt-2">{status}</p>
           )}
@@ -534,13 +734,34 @@ export default function EmbeddingPage() {
               Initializing database...
             </p>
           )}
+
+          {/* Model Info Display */}
+          {modelLoaded && modelCapabilities && (
+            <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+              <h3 className="text-green-300 font-semibold mb-2">Model Information</h3>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-blue-200">
+                  <span className="text-white font-medium">Type:</span> {modelCapabilities.model_type}
+                </div>
+                <div className="text-blue-200">
+                  <span className="text-white font-medium">Embedding Dim:</span> {modelCapabilities.n_embd}D
+                </div>
+                <div className="text-blue-200">
+                  <span className="text-white font-medium">Vocabulary:</span> {modelCapabilities.n_vocab.toLocaleString()} tokens
+                </div>
+                <div className="text-blue-200">
+                  <span className="text-white font-medium">Trained Context:</span> {modelCapabilities.n_ctx_train} tokens
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Error Display */}
         {error && (
           <div className="bg-red-500/20 border border-red-400/50 text-red-200 rounded-lg p-4 mb-6 flex items-start gap-2">
             <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-            <div>{error}</div>
+            <div className="whitespace-pre-wrap">{error}</div>
           </div>
         )}
 
@@ -673,6 +894,11 @@ export default function EmbeddingPage() {
                         </button>
                       </div>
                       <p className="text-white text-sm">{result.document.text}</p>
+                      {result.document.metadata?.source && (
+                        <p className="text-blue-300 text-xs mt-2">
+                          {result.document.metadata.source}
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -705,9 +931,16 @@ export default function EmbeddingPage() {
                         </button>
                       </div>
                       <p className="text-white text-sm">{doc.text}</p>
-                      <p className="text-blue-300 text-xs mt-2">
-                        Vector: {doc.embedding.length}D
-                      </p>
+                      <div className="flex items-center justify-between mt-2">
+                        <p className="text-blue-300 text-xs">
+                          Vector: {doc.embedding.length}D
+                        </p>
+                        {doc.metadata?.source && (
+                          <p className="text-purple-300 text-xs">
+                            {doc.metadata.source}
+                          </p>
+                        )}
+                      </div>
                     </div>
                   ))
                 )}
