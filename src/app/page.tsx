@@ -145,7 +145,7 @@ export default function WllamaUI() {
   }, [messages]);
 
   const initEmbeddingDB = () => {
-    const request = indexedDB.open('VectorDB', 1);
+    const request = indexedDB.open('VectorDB', 2);
 
     request.onsuccess = (event) => {
       embeddingDbRef.current = (event.target as IDBOpenDBRequest).result;

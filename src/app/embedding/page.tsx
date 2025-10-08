@@ -151,7 +151,7 @@ const handleKnowledgeFile = async (f: File) => {
     if (knowledgeFileRef.current) knowledgeFileRef.current.value = '';
   }
 };
-
+  // --- End Knowledge JSON upload states/refs ---
 
   // Initialize IndexedDB
   useEffect(() => {
@@ -174,10 +174,10 @@ const handleKnowledgeFile = async (f: File) => {
           const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
           objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
         }
+            // ⬇️ NEW: knowledgeDocs store for your JSON knowledge items
         if (!db.objectStoreNames.contains('embeddings')) {
-        db.createObjectStore('embeddings', { keyPath: 'id' });
-        // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
-      }
+          db.createObjectStore('embeddings', { keyPath: 'id' });
+        }
       };
     };
 
@@ -635,13 +635,16 @@ const handleKnowledgeFile = async (f: File) => {
 
           <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
             <p className="text-blue-200 text-sm mb-2">
-              <strong>Example models:</strong>
+              <strong>✅ Now supports larger models (up to 500MB+)!</strong>
             </p>
             <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside mb-2">
-              <li><strong>Small models (under 150MB):</strong> bge-base-en-v1.5-q4_k_m.gguf</li>
+              <li><strong>Small models (under 150MB):</strong> bge-base-en-v1.5-q4_k_m.gguf (85MB)</li>
               <li><strong>Medium models (150-300MB):</strong> nomic-embed-text-v1.5-Q8_0.gguf</li>
               <li><strong>Large models (300MB+):</strong> embeddinggemma-300M-Q8_0.gguf (default)</li>
             </ul>
+            <p className="text-green-200 text-xs mt-2">
+              💡 <strong>Optimized loading:</strong> Uses ModelManager with blob loading for better memory efficiency
+            </p>
           </div>
 
           {/* Load Method Tabs */}
@@ -883,79 +886,73 @@ const handleKnowledgeFile = async (f: File) => {
               </button>
             </div>
 
-          {/* Add Upload Documents */}
-            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
-              <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-                <FileText className="w-5 h-5" />
-                Add Document
-              </h2>
-              {/* Upload Knowledge JSON -> stores to IndexedDB (knowledgeDocs) */}
-              <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
-                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-                  <Upload className="w-5 h-5" />
-                  Upload Knowledge JSON
-                </h2>
+            {/* Upload Knowledge JSON -> stores to IndexedDB (knowledgeDocs) */}
+<div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
+  <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+    <Upload className="w-5 h-5" />
+    Upload Knowledge JSON
+  </h2>
 
-                <p className="text-blue-200 text-sm mb-3">
-                  Accepts an array or single object. Uses store <code className="text-white/90">knowledgeDocs</code> keyed by <code className="text-white/90">id</code>.
-                </p>
+  <p className="text-blue-200 text-sm mb-3">
+    Accepts an array or single object. Uses store <code className="text-white/90">Embeddings</code> keyed by <code className="text-white/90">id</code>.
+  </p>
 
-                <input
-                  ref={knowledgeFileRef}
-                  type="file"
-                  accept="application/json,.json"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) void handleKnowledgeFile(f);
-                  }}
-                />
+  <input
+    ref={knowledgeFileRef}
+    type="file"
+    accept="application/json,.json"
+    className="hidden"
+    onChange={(e) => {
+      const f = e.target.files?.[0];
+      if (f) void handleKnowledgeFile(f);
+    }}
+  />
 
-                <button
-                  onClick={handleKnowledgePick}
-                  disabled={!dbReady || knowledgeBusy}
-                  className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-                >
-                  {knowledgeBusy ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Saving…
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-5 h-5" />
-                      Select .json & Save to DB
-                    </>
-                  )}
-                </button>
+  <button
+    onClick={handleKnowledgePick}
+    disabled={!dbReady || knowledgeBusy}
+    className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+  >
+    {knowledgeBusy ? (
+      <>
+        <Loader2 className="w-5 h-5 animate-spin" />
+        Saving…
+      </>
+    ) : (
+      <>
+        <Upload className="w-5 h-5" />
+        Select .json & Save to DB
+      </>
+    )}
+  </button>
 
-                {/* Inline feedback */}
-                {knowledgeResult && (
-                  <div className="mt-3 text-sm text-green-200">
-                    Saved <b>{knowledgeResult.inserted}</b>
-                    {knowledgeResult.failed ? <> • Failed <b>{knowledgeResult.failed}</b></> : null}
-                    {knowledgeResult.errors?.length ? (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-red-200">Errors</summary>
-                        <ul className="list-disc list-inside text-red-200">
-                          {knowledgeResult.errors.slice(0,10).map((e, i) => <li key={i}>{e}</li>)}
-                        </ul>
-                        {knowledgeResult.errors.length > 10 && (
-                          <p className="text-red-300 mt-1">…and {knowledgeResult.errors.length - 10} more</p>
-                        )}
-                      </details>
-                    ) : null}
-                  </div>
-                )}
+  {/* Inline feedback */}
+  {knowledgeResult && (
+    <div className="mt-3 text-sm text-green-200">
+      Saved <b>{knowledgeResult.inserted}</b>
+      {knowledgeResult.failed ? <> • Failed <b>{knowledgeResult.failed}</b></> : null}
+      {knowledgeResult.errors?.length ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-red-200">Errors</summary>
+          <ul className="list-disc list-inside text-red-200">
+            {knowledgeResult.errors.slice(0,10).map((e, i) => <li key={i}>{e}</li>)}
+          </ul>
+          {knowledgeResult.errors.length > 10 && (
+            <p className="text-red-300 mt-1">…and {knowledgeResult.errors.length - 10} more</p>
+          )}
+        </details>
+      ) : null}
+    </div>
+  )}
 
-                {knowledgeError && (
-                  <div className="mt-3 text-sm text-red-200 flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 mt-0.5" />
-                    <span className="whitespace-pre-wrap">{knowledgeError}</span>
-                  </div>
-                )}
-              </div>
-            </div>
+  {knowledgeError && (
+    <div className="mt-3 text-sm text-red-200 flex items-start gap-2">
+      <AlertCircle className="w-4 h-4 mt-0.5" />
+      <span className="whitespace-pre-wrap">{knowledgeError}</span>
+    </div>
+  )}
+</div>
+
 
             {/* Search */}
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
