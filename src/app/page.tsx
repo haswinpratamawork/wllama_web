@@ -1,7 +1,10 @@
 'use client';
 
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Play, Loader2, Send, Trash2, User, Bot, Download, Save, Plus, MessageSquare, Menu, X, Globe, HardDrive, Database, BookOpen, Sparkles, FileStack } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+// import { ChatModelManager } from '@/lib/chatModelManager';
+import { useEmbeddingModel } from '@/hooks/useEmbeddingModel';
+import { Upload, Play, Loader2, Send, Trash2, User, Bot, Download, Save, Plus, MessageSquare, Menu, X, Globe, HardDrive, Database, BookOpen, Sparkles, FileStack, Check } from 'lucide-react';
 
 interface ProgressCallback {
   loaded: number;
@@ -58,6 +61,20 @@ interface EmbeddingDocument {
 }
 
 export default function WllamaUI() {
+  const {
+    embeddingModel,
+    isLoaded: embeddingModelLoaded,
+    isLoading: loadingEmbeddingModel,
+    loadProgress: embeddingModelProgress,
+    error: embeddingModelError,
+    status: embeddingModelStatus,
+    modelCapabilities: embeddingModelCapabilities,
+    loadEmbeddingModel,
+    unloadEmbeddingModel,
+  } = useEmbeddingModel();
+
+  const router = useRouter();
+
   const [isLoading, setIsLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
   const [input, setInput] = useState('');
@@ -69,6 +86,7 @@ export default function WllamaUI() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showModelManager, setShowModelManager] = useState(false);
+  const [modelManagerTab, setModelManagerTab] = useState<'chat' | 'embedding' | 'cached'>('chat');
   const [modelUrl, setModelUrl] = useState('');
   const [cachedModels, setCachedModels] = useState<CachedModel[]>([]);
   const [loadMethod, setLoadMethod] = useState<'url' | 'file' | 'split'>('url');
@@ -82,8 +100,9 @@ export default function WllamaUI() {
   const [chatTemplate, setChatTemplate] = useState<'gemma' | 'qwen' | 'llama' | 'chatml'>('gemma');
   const [useRAG, setUseRAG] = useState(false);
   const [ragTopK, setRagTopK] = useState(3);
-  const [embeddingModel, setEmbeddingModel] = useState<Wllama | null>(null);
   const [knowledgeBaseCount, setKnowledgeBaseCount] = useState(0);
+  const [embeddingModelUrl, setEmbeddingModelUrl] = useState('https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf');
+
   const wllamaRef = useRef<Wllama | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const splitFileInputRef = useRef<HTMLInputElement>(null);
@@ -155,6 +174,14 @@ export default function WllamaUI() {
     request.onerror = () => {
       console.error('Failed to open embedding database');
     };
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains('embeddings')) {
+        const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
+        objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
+      }
+    };
   };
 
   const loadKnowledgeBaseCount = () => {
@@ -185,21 +212,24 @@ export default function WllamaUI() {
 
   const retrieveRelevantDocuments = async (query: string, topK: number = 3): Promise<EmbeddingDocument[]> => {
     if (!embeddingDbRef.current || !embeddingModel) {
+      console.warn('Cannot retrieve documents: DB or embedding model not ready');
       return [];
     }
 
     try {
-      // Enable embeddings mode
+      setStatus('Creating query embedding...');
+      
       if (embeddingModel.setOptions) {
         await embeddingModel.setOptions({ embeddings: true });
       }
 
       const queryEmbedding = await embeddingModel.createEmbedding(query);
 
-      // Switch back to generation mode
       if (embeddingModel.setOptions) {
         await embeddingModel.setOptions({ embeddings: false });
       }
+
+      setStatus('Searching knowledge base...');
 
       const transaction = embeddingDbRef.current.transaction(['embeddings'], 'readonly');
       const objectStore = transaction.objectStore('embeddings');
@@ -209,6 +239,13 @@ export default function WllamaUI() {
         request.onsuccess = () => {
           const documents = request.result as EmbeddingDocument[];
           
+          if (documents.length === 0) {
+            console.warn('No documents in knowledge base');
+            setStatus('');
+            resolve([]);
+            return;
+          }
+
           const results = documents.map(doc => ({
             document: doc,
             similarity: cosineSimilarity(queryEmbedding, doc.embedding)
@@ -217,14 +254,18 @@ export default function WllamaUI() {
           results.sort((a, b) => b.similarity - a.similarity);
           const topResults = results.slice(0, topK).map(r => r.document);
           
+          setStatus('');
           resolve(topResults);
         };
 
-        request.onerror = () => reject('Failed to retrieve documents');
+        request.onerror = () => {
+          setStatus('');
+          reject('Failed to retrieve documents');
+        };
       });
     } catch (err) {
       console.error('Error retrieving documents:', err);
-      // Switch back to generation mode even on error
+      setStatus('');
       if (embeddingModel?.setOptions) {
         try {
           await embeddingModel.setOptions({ embeddings: false });
@@ -603,21 +644,6 @@ export default function WllamaUI() {
     }
   };
 
-  const loadEmbeddingModel = async () => {
-    if (!wllamaRef.current) {
-      setError('Please load chat model first');
-      return;
-    }
-
-    try {
-      setStatus('Embedding model ready (using chat model)');
-      setEmbeddingModel(wllamaRef.current);
-      setUseRAG(true);
-    } catch (err: any) {
-      setError('Failed to enable RAG: ' + (err?.message || String(err)));
-    }
-  };
-
   const deleteCachedModel = async (url: string) => {
     try {
       const WllamaModule = await import('@wllama/wllama/esm/index.js');
@@ -762,7 +788,6 @@ export default function WllamaUI() {
         return conv;
       }));
 
-      // Build the prompt here
       const formattedPrompt = buildConversationPrompt(messages, userMessage, ragContext.length > 0 ? ragContext : undefined);
 
       let fullContent = '';
@@ -863,6 +888,21 @@ export default function WllamaUI() {
     URL.revokeObjectURL(url);
   };
 
+  const handleRAGToggle = () => {
+    if (!wllamaRef.current) {
+      setError('Please load chat model first');
+      return;
+    }
+
+    if (!embeddingModelLoaded) {
+      setShowModelManager(true);
+      setModelManagerTab('embedding');
+      return;
+    }
+
+    setUseRAG(!useRAG);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex">
       <div className={`${sidebarOpen ? 'w-64' : 'w-0'} transition-all duration-300 bg-slate-950/50 backdrop-blur-lg border-r border-white/10 flex flex-col overflow-hidden`}>
@@ -884,7 +924,7 @@ export default function WllamaUI() {
             Manage models
           </button>
           <button 
-            onClick={() => window.location.href = '/embedding'}
+            onClick={() => router.push('/embedding')}
             className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
           >
             <Database className="w-4 h-4" />
@@ -898,14 +938,8 @@ export default function WllamaUI() {
                 RAG Mode
               </label>
               <button
-                onClick={() => {
-                  if (!useRAG && wllamaRef.current) {
-                    loadEmbeddingModel();
-                  } else {
-                    setUseRAG(!useRAG);
-                  }
-                }}
-                disabled={!wllamaRef.current || knowledgeBaseCount === 0}
+                onClick={handleRAGToggle}
+                disabled={!wllamaRef.current || (useRAG && knowledgeBaseCount === 0)}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                   useRAG ? 'bg-green-600' : 'bg-gray-600'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
@@ -917,10 +951,42 @@ export default function WllamaUI() {
                 />
               </button>
             </div>
-            <p className="text-xs text-blue-200 mb-2">
-              Knowledge: {knowledgeBaseCount} documents
-            </p>
-            {useRAG && (
+            
+            {embeddingModelLoaded ? (
+              <>
+                <p className="text-xs text-green-200 mb-1 flex items-center gap-1">
+                  <Sparkles className="w-3 h-3" />
+                  Embedding model ready
+                </p>
+                <p className="text-xs text-blue-200 mb-2">
+                  Knowledge: {knowledgeBaseCount} documents
+                </p>
+                {embeddingModelCapabilities && (
+                  <p className="text-xs text-purple-200">
+                    {embeddingModelCapabilities.n_embd}D vectors
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-yellow-200 mb-2">
+                  ⚠️ No embedding model loaded
+                </p>
+                <button
+                  onClick={() => {
+                    setShowModelManager(true);
+                    setModelManagerTab('embedding');
+                  }}
+                  disabled={!wllamaRef.current}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 text-white text-xs font-semibold py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
+                >
+                  <Download className="w-3 h-3" />
+                  Load in Model Manager
+                </button>
+              </>
+            )}
+            
+            {useRAG && embeddingModelLoaded && (
               <div className="mt-2">
                 <label className="text-xs text-purple-200 block mb-1">
                   Top K: {ragTopK}
@@ -972,11 +1038,12 @@ export default function WllamaUI() {
         </div>
       </div>
 
+      {/* Model Manager Modal */}
       {showModelManager && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 rounded-2xl border border-white/20 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
-            <div className="p-6 border-b border-white/10 flex items-center justify-between sticky top-0 bg-slate-900">
-              <h2 className="text-2xl font-bold text-white">Manage Models</h2>
+          <div className="bg-slate-900 rounded-2xl border border-white/20 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-white/10 flex items-center justify-between sticky top-0 bg-slate-900 z-10">
+              <h2 className="text-2xl font-bold text-white">Model Manager</h2>
               <button
                 onClick={() => setShowModelManager(false)}
                 className="text-white hover:bg-white/10 p-2 rounded-lg transition-colors"
@@ -986,216 +1053,212 @@ export default function WllamaUI() {
             </div>
 
             <div className="p-6">
+              <div className="mb-6">
+                <div className="flex items-center gap-4 p-4 bg-purple-500/10 border border-purple-500/30 rounded-lg">
+                  <Database className="w-6 h-6 text-purple-300" />
+                  <div className="flex-1">
+                    <h3 className="text-white font-semibold">Centralized Model Management</h3>
+                    <p className="text-purple-200 text-sm">Load and manage both chat and embedding models in one place</p>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex gap-2 mb-6">
                 <button
-                  onClick={() => setLoadMethod('url')}
-                  className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${loadMethod === 'url'
-                    ? 'bg-purple-600 text-white'
-                    : 'bg-white/10 text-purple-200 hover:bg-white/20'
-                    }`}
+                  onClick={() => setModelManagerTab('chat')}
+                  className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    modelManagerTab === 'chat'
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                  }`}
                 >
-                  <Globe className="w-4 h-4" />
-                  From URL
+                  <MessageSquare className="w-5 h-5" />
+                  Chat Model
                 </button>
                 <button
-                  onClick={() => setLoadMethod('file')}
-                  className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${loadMethod === 'file'
-                    ? 'bg-purple-600 text-white'
-                    : 'bg-white/10 text-purple-200 hover:bg-white/20'
-                    }`}
+                  onClick={() => setModelManagerTab('embedding')}
+                  className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    modelManagerTab === 'embedding'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white/10 text-blue-200 hover:bg-white/20'
+                  }`}
                 >
-                  <Upload className="w-4 h-4" />
-                  From File
+                  <Sparkles className="w-5 h-5" />
+                  Embedding Model
                 </button>
                 <button
-                  onClick={() => setLoadMethod('split')}
-                  className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${loadMethod === 'split'
-                    ? 'bg-purple-600 text-white'
-                    : 'bg-white/10 text-purple-200 hover:bg-white/20'
-                    }`}
+                  onClick={() => setModelManagerTab('cached')}
+                  className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    modelManagerTab === 'cached'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-white/10 text-green-200 hover:bg-white/20'
+                  }`}
                 >
-                  <FileStack className="w-4 h-4" />
-                  Split Model
+                  <HardDrive className="w-5 h-5" />
+                  Cache ({cachedModels.length})
                 </button>
               </div>
 
-              {loadMethod === 'url' && (
-                <div className="mb-6">
-                  <label className="block text-white font-semibold mb-3">
-                    Hugging Face Repository or Direct URL
-                  </label>
-                  <input
-                    type="text"
-                    value={modelUrl}
-                    onChange={(e) => handleRepoInputChange(e.target.value)}
-                    placeholder="e.g., ggml-org/gemma-3-270m-it-GGUF"
-                    className="w-full bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 mb-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-
-                  {fetchingFiles && (
-                    <div className="flex items-center gap-2 text-purple-300 mb-3">
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      <span className="text-sm">Fetching repository files...</span>
-                    </div>
-                  )}
-
-                  {availableFiles.length > 0 && (
-                    <div className="mb-3">
-                      <label className="block text-purple-200 text-sm mb-2">
-                        Select a GGUF file ({availableFiles.length} available)
-                      </label>
-                      <select
-                        value={selectedFile}
-                        onChange={(e) => setSelectedFile(e.target.value)}
-                        className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                      >
-                        <option value="">Choose a file...</option>
-                        {availableFiles.map((file) => (
-                          <option key={file} value={file}>
-                            {file}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={() => loadModelFromUrl(modelUrl)}
-                    disabled={(!selectedFile && availableFiles.length > 0) || isLoading || !modelUrl}
-                    className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        Loading... {loadProgress}%
-                      </>
-                    ) : (
-                      <>
-                        <Download className="w-5 h-5" />
-                        {availableFiles.length > 0 ? 'Download & Load Selected' : 'Download & Load Model'}
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-
-              {loadMethod === 'file' && (
-                <div className="mb-6">
-                  <label className="block text-white font-semibold mb-3">
-                    Select Local .gguf File
-                  </label>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".gguf"
-                    multiple
-                    onChange={handleFileSelect}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
-                  >
-                    <Upload className="w-5 h-5" />
-                    Choose File
-                  </button>
-                  {modelFile && (
-                    <p className="text-green-300 text-sm mb-3">
-                      Selected: {modelFile.length} file(s)
+              {modelManagerTab === 'chat' && (
+                <div>
+                  <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                    <p className="text-blue-200 text-sm mb-2">
+                      <strong>💬 Chat Model:</strong> The main LLM for conversations
                     </p>
-                  )}
-                  <button
-                    onClick={() => loadModelFromFile()}
-                    disabled={!modelFile || isLoading}
-                    className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        Loading... {loadProgress}%
-                      </>
-                    ) : (
-                      <>
-                        <Play className="w-5 h-5" />
-                        Load Model
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-
-              {loadMethod === 'split' && (
-                <div className="mb-6">
-                  <div className="flex items-center gap-2 mb-4">
-                    <FileStack className="w-5 h-5 text-purple-300" />
-                    <h3 className="text-white font-semibold">Load Split Model</h3>
+                    <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside">
+                      <li>Generates responses to your messages</li>
+                      <li>Supports multiple chat templates (Gemma, Qwen, Llama, ChatML)</li>
+                      <li>Recommended: gemma-2b-it-GGUF or qwen models</li>
+                    </ul>
                   </div>
+
+                  {wllamaRef.current && (
+                    <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-green-300 font-semibold flex items-center gap-2">
+                            <Check className="w-4 h-4" />
+                            Chat model loaded
+                          </p>
+                          <p className="text-green-200 text-sm">Ready for conversations</p>
+                        </div>
+                        <button
+                          onClick={() => {
+                            wllamaRef.current = null;
+                            setStatus('Chat model unloaded');
+                          }}
+                          className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm"
+                        >
+                          Unload
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="flex gap-2 mb-4">
                     <button
-                      onClick={() => setSplitLoadMethod('local')}
+                      onClick={() => setLoadMethod('url')}
                       className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
-                        splitLoadMethod === 'local'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-white/10 text-purple-200 hover:bg-white/20'
-                      }`}
-                    >
-                      <Upload className="w-4 h-4" />
-                      Local Files
-                    </button>
-                    <button
-                      onClick={() => setSplitLoadMethod('url')}
-                      className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
-                        splitLoadMethod === 'url'
+                        loadMethod === 'url'
                           ? 'bg-purple-600 text-white'
                           : 'bg-white/10 text-purple-200 hover:bg-white/20'
                       }`}
                     >
                       <Globe className="w-4 h-4" />
-                      From URLs
+                      From URL
+                    </button>
+                    <button
+                      onClick={() => setLoadMethod('file')}
+                      className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                        loadMethod === 'file'
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                      }`}
+                    >
+                      <Upload className="w-4 h-4" />
+                      From File
+                    </button>
+                    <button
+                      onClick={() => setLoadMethod('split')}
+                      className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                        loadMethod === 'split'
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                      }`}
+                    >
+                      <FileStack className="w-4 h-4" />
+                      Split Model
                     </button>
                   </div>
 
-                  {splitLoadMethod === 'local' && (
-                    <div>
-                      <label className="block text-purple-200 text-sm mb-2">
-                        Select all split model files (sorted automatically)
+                  {loadMethod === 'url' && (
+                    <div className="mb-6">
+                      <label className="block text-white font-semibold mb-3">
+                        Hugging Face Repository or Direct URL
                       </label>
                       <input
-                        ref={splitFileInputRef}
-                        type="file"
-                        accept=".gguf"
-                        multiple
-                        onChange={handleSplitFileSelect}
-                        className="hidden"
+                        type="text"
+                        value={modelUrl}
+                        onChange={(e) => handleRepoInputChange(e.target.value)}
+                        placeholder="e.g., ggml-org/gemma-2-2b-it-GGUF"
+                        className="w-full bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 mb-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
                       />
-                      <button
-                        onClick={() => splitFileInputRef.current?.click()}
-                        disabled={isLoading}
-                        className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
-                      >
-                        <Upload className="w-5 h-5" />
-                        Choose Split Files
-                      </button>
 
-                      {splitFiles.length > 0 && (
-                        <div className="bg-white/5 border border-white/10 rounded-lg p-3 mb-3">
-                          <p className="text-green-300 text-sm font-semibold mb-2">
-                            {splitFiles.length} file(s) selected:
-                          </p>
-                          <ul className="text-purple-200 text-xs space-y-1">
-                            {splitFiles.map((file, idx) => (
-                              <li key={idx} className="truncate">
-                                {idx + 1}. {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
-                              </li>
+                      {fetchingFiles && (
+                        <div className="flex items-center gap-2 text-purple-300 mb-3">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span className="text-sm">Fetching repository files...</span>
+                        </div>
+                      )}
+
+                      {availableFiles.length > 0 && (
+                        <div className="mb-3">
+                          <label className="block text-purple-200 text-sm mb-2">
+                            Select a GGUF file ({availableFiles.length} available)
+                          </label>
+                          <select
+                            value={selectedFile}
+                            onChange={(e) => setSelectedFile(e.target.value)}
+                            className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                          >
+                            <option value="">Choose a file...</option>
+                            {availableFiles.map((file) => (
+                              <option key={file} value={file}>
+                                {file}
+                              </option>
                             ))}
-                          </ul>
+                          </select>
                         </div>
                       )}
 
                       <button
-                        onClick={() => loadSplitModel(splitFiles)}
-                        disabled={splitFiles.length === 0 || isLoading}
+                        onClick={() => loadModelFromUrl(modelUrl)}
+                        disabled={(!selectedFile && availableFiles.length > 0) || isLoading || !modelUrl}
+                        className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                      >
+                        {isLoading ? (
+                          <>
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            Loading... {loadProgress}%
+                          </>
+                        ) : (
+                          <>
+                            <Download className="w-5 h-5" />
+                            {availableFiles.length > 0 ? 'Download & Load Selected' : 'Download & Load Model'}
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+
+                  {loadMethod === 'file' && (
+                    <div className="mb-6">
+                      <label className="block text-white font-semibold mb-3">
+                        Select Local .gguf File
+                      </label>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".gguf"
+                        multiple
+                        onChange={handleFileSelect}
+                        className="hidden"
+                      />
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
+                      >
+                        <Upload className="w-5 h-5" />
+                        Choose File
+                      </button>
+                      {modelFile && (
+                        <p className="text-green-300 text-sm mb-3">
+                          Selected: {modelFile.length} file(s)
+                        </p>
+                      )}
+                      <button
+                        onClick={() => loadModelFromFile()}
+                        disabled={!modelFile || isLoading}
                         className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                       >
                         {isLoading ? (
@@ -1206,147 +1269,367 @@ export default function WllamaUI() {
                         ) : (
                           <>
                             <Play className="w-5 h-5" />
-                            Load {splitFiles.length} Split Files
+                            Load Model
                           </>
                         )}
                       </button>
                     </div>
                   )}
 
-                  {splitLoadMethod === 'url' && (
-                    <div>
-                      <label className="block text-purple-200 text-sm mb-2">
-                        Enter URLs for each split (in order)
-                      </label>
-                      
-                      <div className="space-y-2 mb-3">
-                        {splitUrls.map((url, idx) => (
-                          <div key={idx} className="flex gap-2">
-                            <input
-                              type="text"
-                              value={url}
-                              onChange={(e) => updateSplitUrl(idx, e.target.value)}
-                              placeholder={`Split ${idx + 1} URL`}
-                              className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                              disabled={isLoading}
-                            />
-                            {splitUrls.length > 1 && (
-                              <button
-                                onClick={() => removeSplitUrl(idx)}
-                                disabled={isLoading}
-                                className="bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white px-3 rounded-lg transition-colors"
-                              >
-                                ✕
-                              </button>
-                            )}
-                          </div>
-                        ))}
+                  {loadMethod === 'split' && (
+                    <div className="mb-6">
+                      <div className="flex items-center gap-2 mb-4">
+                        <FileStack className="w-5 h-5 text-purple-300" />
+                        <h3 className="text-white font-semibold">Load Split Model</h3>
                       </div>
 
-                      <button
-                        onClick={addSplitUrl}
-                        disabled={isLoading}
-                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors mb-3 text-sm"
-                      >
-                        + Add Another Split URL
-                      </button>
+                      <div className="flex gap-2 mb-4">
+                        <button
+                          onClick={() => setSplitLoadMethod('local')}
+                          className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                            splitLoadMethod === 'local'
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          }`}
+                        >
+                          <Upload className="w-4 h-4" />
+                          Local Files
+                        </button>
+                        <button
+                          onClick={() => setSplitLoadMethod('url')}
+                          className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                            splitLoadMethod === 'url'
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          }`}
+                        >
+                          <Globe className="w-4 h-4" />
+                          From URLs
+                        </button>
+                      </div>
 
-                      <button
-                        onClick={loadSplitFromUrls}
-                        disabled={splitUrls.filter(u => u.trim()).length === 0 || isLoading}
-                        className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-                      >
-                        {isLoading ? (
-                          <>
-                            <Loader2 className="w-5 h-5 animate-spin" />
-                            Loading... {loadProgress}%
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-5 h-5" />
-                            Download & Load {splitUrls.filter(u => u.trim()).length} Splits
-                          </>
-                        )}
-                      </button>
+                      {splitLoadMethod === 'local' && (
+                        <div>
+                          <label className="block text-purple-200 text-sm mb-2">
+                            Select all split model files (sorted automatically)
+                          </label>
+                          <input
+                            ref={splitFileInputRef}
+                            type="file"
+                            accept=".gguf"
+                            multiple
+                            onChange={handleSplitFileSelect}
+                            className="hidden"
+                          />
+                          <button
+                            onClick={() => splitFileInputRef.current?.click()}
+                            disabled={isLoading}
+                            className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
+                          >
+                            <Upload className="w-5 h-5" />
+                            Choose Split Files
+                          </button>
+
+                          {splitFiles.length > 0 && (
+                            <div className="bg-white/5 border border-white/10 rounded-lg p-3 mb-3">
+                              <p className="text-green-300 text-sm font-semibold mb-2">
+                                {splitFiles.length} file(s) selected:
+                              </p>
+                              <ul className="text-purple-200 text-xs space-y-1 max-h-32 overflow-y-auto">
+                                {splitFiles.map((file, idx) => (
+                                  <li key={idx} className="truncate">
+                                    {idx + 1}. {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          <button
+                            onClick={() => loadSplitModel(splitFiles)}
+                            disabled={splitFiles.length === 0 || isLoading}
+                            className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                          >
+                            {isLoading ? (
+                              <>
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                Loading... {loadProgress}%
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-5 h-5" />
+                                Load {splitFiles.length} Split Files
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
+
+                      {splitLoadMethod === 'url' && (
+                        <div>
+                          <label className="block text-purple-200 text-sm mb-2">
+                            Enter URLs for each split (in order)
+                          </label>
+                          
+                          <div className="space-y-2 mb-3 max-h-48 overflow-y-auto">
+                            {splitUrls.map((url, idx) => (
+                              <div key={idx} className="flex gap-2">
+                                <input
+                                  type="text"
+                                  value={url}
+                                  onChange={(e) => updateSplitUrl(idx, e.target.value)}
+                                  placeholder={`Split ${idx + 1} URL`}
+                                  className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                  disabled={isLoading}
+                                />
+                                {splitUrls.length > 1 && (
+                                  <button
+                                    onClick={() => removeSplitUrl(idx)}
+                                    disabled={isLoading}
+                                    className="bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white px-3 rounded-lg transition-colors"
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+
+                          <button
+                            onClick={addSplitUrl}
+                            disabled={isLoading}
+                            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors mb-3 text-sm"
+                          >
+                            + Add Another Split URL
+                          </button>
+
+                          <button
+                            onClick={loadSplitFromUrls}
+                            disabled={splitUrls.filter(u => u.trim()).length === 0 || isLoading}
+                            className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                          >
+                            {isLoading ? (
+                              <>
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                Loading... {loadProgress}%
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-5 h-5" />
+                                Download & Load {splitUrls.filter(u => u.trim()).length} Splits
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
-                  <div className="mt-3 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
-                    <p className="text-blue-200 text-xs">
-                      <strong>Split Models:</strong> Load models split into multiple files. Select all parts in order.
-                    </p>
+                  <div className="bg-white/5 border border-white/10 rounded-lg p-4">
+                    <label className="block text-purple-200 text-sm mb-2">
+                      Context Size: {nCtx}
+                    </label>
+                    <input
+                      type="range"
+                      min="128"
+                      max="8192"
+                      step="128"
+                      value={nCtx}
+                      onChange={(e) => setNCtx(Number(e.target.value))}
+                      className="w-full"
+                    />
+                    <div className="mt-4">
+                      <label className="block text-white font-semibold mb-3">
+                        Chat Template
+                      </label>
+                      <select
+                        value={chatTemplate}
+                        onChange={(e) => setChatTemplate(e.target.value as any)}
+                        className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      >
+                        <option value="gemma">Gemma (Google)</option>
+                        <option value="qwen">Qwen (Alibaba)</option>
+                        <option value="llama">Llama 2/3 (Meta)</option>
+                        <option value="chatml">ChatML (General)</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
               )}
 
-              <div className="mb-6 bg-white/5 border border-white/10 rounded-lg p-4">
-                <label className="block text-purple-200 text-sm mb-2">
-                  Context Size: {nCtx}
-                </label>
-                <input
-                  type="range"
-                  min="128"
-                  max="8192"
-                  step="128"
-                  value={nCtx}
-                  onChange={(e) => setNCtx(Number(e.target.value))}
-                  className="w-full"
-                />
-              </div>
+              {modelManagerTab === 'embedding' && (
+                <div>
+                  <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                    <p className="text-blue-200 text-sm mb-2">
+                      <strong>✨ Embedding Model:</strong> Converts text to vectors for RAG
+                    </p>
+                    <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside">
+                      <li>Required for semantic search in knowledge base</li>
+                      <li>Shared across chat and embedding pages</li>
+                      <li>Recommended: embeddinggemma-300M-Q8_0.gguf (~300MB)</li>
+                    </ul>
+                  </div>
 
-              <div className="mb-6 bg-white/5 border border-white/10 rounded-lg p-4">
-                <label className="block text-white font-semibold mb-3">
-                  Chat Template
-                </label>
-                <select
-                  value={chatTemplate}
-                  onChange={(e) => setChatTemplate(e.target.value as any)}
-                  className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                >
-                  <option value="gemma">Gemma (Google)</option>
-                  <option value="qwen">Qwen (Alibaba)</option>
-                  <option value="llama">Llama 2/3 (Meta)</option>
-                  <option value="chatml">ChatML (General)</option>
-                </select>
-              </div>
-
-              <div>
-                <h3 className="text-white font-semibold mb-3">Cached Models ({cachedModels.length})</h3>
-                <div className="space-y-2">
-                  {cachedModels.length === 0 ? (
-                    <p className="text-purple-300 text-sm">No models cached yet</p>
-                  ) : (
-                    cachedModels.map((model) => (
-                      <div
-                        key={model.url}
-                        className="bg-white/5 border border-white/10 rounded-lg p-4 flex items-center justify-between"
-                      >
-                        <div className="flex-1">
-                          <p className="text-white font-medium">{model.name}</p>
-                          <p className="text-purple-300 text-xs">
-                            Size: {(model.size / 1024 / 1024).toFixed(1)} MB
+                  {embeddingModelLoaded && (
+                    <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <div>
+                          <p className="text-green-300 font-semibold flex items-center gap-2">
+                            <Check className="w-4 h-4" />
+                            Embedding model loaded
                           </p>
+                          <p className="text-green-200 text-sm">Ready for RAG and semantic search</p>
                         </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => loadModelFromUrl(model.url)}
-                            disabled={isLoading}
-                            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm"
-                          >
-                            Load
-                          </button>
-                          <button
-                            onClick={() => deleteCachedModel(model.url)}
-                            className="bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => {
+                            if (window.confirm('Unload embedding model? RAG features will be disabled.')) {
+                              unloadEmbeddingModel();
+                            }
+                          }}
+                          className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm"
+                        >
+                          Unload
+                        </button>
                       </div>
-                    ))
+                      {embeddingModelCapabilities && (
+                        <div className="grid grid-cols-2 gap-2 text-sm mt-3 p-3 bg-white/5 rounded-lg">
+                          <div className="text-blue-200">
+                            <span className="text-white font-medium">Type:</span> {embeddingModelCapabilities.model_type}
+                          </div>
+                          <div className="text-blue-200">
+                            <span className="text-white font-medium">Dimensions:</span>: {embeddingModelCapabilities.n_embd}D
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="space-y-3">
+                    <input
+                      type="text"
+                      value={embeddingModelUrl}
+                      onChange={(e) => setEmbeddingModelUrl(e.target.value)}
+                      placeholder="https://huggingface.co/.../model.gguf"
+                      className="w-full bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={loadingEmbeddingModel}
+                    />
+                    
+                    <button
+                      onClick={async () => {
+                        await loadEmbeddingModel(embeddingModelUrl);
+                      }}
+                      disabled={loadingEmbeddingModel || embeddingModelLoaded || !embeddingModelUrl}
+                      className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      {loadingEmbeddingModel ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          Loading... {embeddingModelProgress}%
+                        </>
+                      ) : embeddingModelLoaded ? (
+                        <>
+                          <Check className="w-5 h-5" />
+                          Model Loaded
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-5 h-5" />
+                          Download & Load Embedding Model
+                        </>
+                      )}
+                    </button>
+
+                    {embeddingModelStatus && (
+                      <p className="text-blue-300 text-sm">{embeddingModelStatus}</p>
+                    )}
+
+                    {embeddingModelError && (
+                      <p className="text-red-300 text-sm whitespace-pre-wrap">{embeddingModelError}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {modelManagerTab === 'cached' && (
+                <div>
+                  <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                    <p className="text-green-200 text-sm mb-2">
+                      <strong>💾 Cached Models:</strong> Models stored in browser cache
+                    </p>
+                    <ul className="text-green-200 text-xs space-y-1 list-disc list-inside">
+                      <li>Instantly load previously downloaded models</li>
+                      <li>No re-download required</li>
+                      <li>Clear cache to free up space or reload fresh models</li>
+                    </ul>
+                  </div>
+
+                  {cachedModels.length === 0 ? (
+                    <div className="text-center py-8">
+                      <HardDrive className="w-16 h-16 mx-auto mb-4 text-gray-500 opacity-50" />
+                      <p className="text-gray-400 mb-2">No cached models yet</p>
+                      <p className="text-gray-500 text-sm">Download models from Chat or Embedding tabs to cache them</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mb-4 flex items-center justify-between">
+                        <p className="text-white font-semibold">{cachedModels.length} Cached Model(s)</p>
+                        <button
+                          onClick={async () => {
+                            if (window.confirm('Clear ALL cached models? This will free up space but you\'ll need to re-download models.')) {
+                              for (const model of cachedModels) {
+                                await deleteCachedModel(model.url);
+                              }
+                            }
+                          }}
+                          className="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          Clear All Cache
+                        </button>
+                      </div>
+
+                      <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                        {cachedModels.map((model) => (
+                          <div
+                            key={model.url}
+                            className="bg-white/5 border border-white/10 rounded-lg p-4 flex items-center justify-between hover:bg-white/10 transition-colors"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="text-white font-medium truncate">{model.name}</p>
+                              <p className="text-purple-300 text-xs">
+                                Size: {(model.size / 1024 / 1024).toFixed(1)} MB
+                              </p>
+                            </div>
+                            <div className="flex gap-2 ml-4">
+                              <button
+                                onClick={() => loadModelFromUrl(model.url)}
+                                disabled={isLoading}
+                                className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm whitespace-nowrap"
+                              >
+                                Load as Chat
+                              </button>
+                              <button
+                                onClick={() => loadEmbeddingModel(model.url)}
+                                disabled={loadingEmbeddingModel}
+                                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm whitespace-nowrap"
+                              >
+                                Load as Embedding
+                              </button>
+                              <button
+                                onClick={() => deleteCachedModel(model.url)}
+                                className="bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg"
+                                title="Delete from cache"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </div>
-              </div>
+              )}
             </div>
           </div>
         </div>

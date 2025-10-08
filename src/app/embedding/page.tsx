@@ -1,7 +1,9 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Database, Upload, Search, Trash2, Download, Loader2, FileText, Zap, Home, AlertCircle, Play, Globe } from 'lucide-react';
+import { useEmbeddingModel } from '@/hooks/useEmbeddingModel';
+import Link from 'next/link';
+import { Database, Upload, Search, Trash2, Download, Loader2, FileText, Home, AlertCircle, Check, Sparkles } from 'lucide-react';
 
 interface EmbeddingDocument {
   id: string;
@@ -18,142 +20,30 @@ interface SearchResult {
   similarity: number;
 }
 
-interface Wllama {
-  loadModel: (blobs: Blob[], config: any) => Promise<void>;
-  createEmbedding: (text: string, options?: { skipBOS?: boolean; skipEOS?: boolean }) => Promise<number[]>;
-  setOptions?: (options: { embeddings: boolean }) => Promise<void>;
-  getModelMetadata: () => ModelMetadata;
-  getLoadedContextInfo: () => LoadedContextInfo;
-}
-
-interface ModelMetadata {
-  hparams: {
-    nVocab: number;
-    nCtxTrain: number;
-    nEmbd: number;
-    nLayer: number;
-  };
-  meta: Record<string, string>;
-}
-
-interface LoadedContextInfo {
-  n_ctx: number;
-  n_batch: number;
-  n_ubatch: number;
-  n_embd: number;
-}
-
-interface CachedModel {
-  url: string;
-  size: number;
-  name: string;
-}
-
 export default function EmbeddingPage() {
+  const {
+    embeddingModel,
+    isLoaded: modelLoaded,
+    modelCapabilities,
+  } = useEmbeddingModel();
+
   const [documents, setDocuments] = useState<EmbeddingDocument[]>([]);
   const [inputText, setInputText] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
-  const [modelLoaded, setModelLoaded] = useState(false);
-  const [loadingModel, setLoadingModel] = useState(false);
-  const [loadProgress, setLoadProgress] = useState(0);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
   const [dbReady, setDbReady] = useState(false);
-  const [loadMethod, setLoadMethod] = useState<'url' | 'file' | 'cached'>('url');
-  const [modelUrl, setModelUrl] = useState('https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf');
-  const [modelFiles, setModelFiles] = useState<FileList | null>(null);
-  const [cachedModels, setCachedModels] = useState<CachedModel[]>([]);
-  const [selectedCachedModel, setSelectedCachedModel] = useState('');
-  const [modelCapabilities, setModelCapabilities] = useState<{
-    n_ctx_train: number;
-    n_embd: number;
-    n_vocab: number;
-    model_type: string;
-  } | null>(null);
   
-  const wllamaRef = useRef<Wllama | null>(null);
-  const modelManagerRef = useRef<any>(null);
   const dbRef = useRef<IDBDatabase | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Knowledge JSON upload states/refs ---
-const knowledgeFileRef = useRef<HTMLInputElement | null>(null);
-const [knowledgeBusy, setKnowledgeBusy] = useState(false);
-const [knowledgeResult, setKnowledgeResult] = useState<{ inserted: number; failed: number; errors: string[] } | null>(null);
-const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const knowledgeFileRef = useRef<HTMLInputElement | null>(null);
+  const [knowledgeBusy, setKnowledgeBusy] = useState(false);
+  const [knowledgeResult, setKnowledgeResult] = useState<{ inserted: number; failed: number; errors: string[] } | null>(null);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
 
-// Save many knowledge docs into 'knowledgeDocs'
-async function putManyKnowledge(docs: any[]): Promise<{ inserted: number; failed: number; errors: string[] }> {
-  if (!dbRef.current) throw new Error('DB not ready');
-  const db = dbRef.current;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction('embeddings', 'readwrite');
-    const store = tx.objectStore('embeddings');
-
-    let inserted = 0;
-    let failed = 0;
-    const errors: string[] = [];
-
-    docs.forEach((doc, idx) => {
-      try {
-        if (!doc || typeof doc !== 'object') {
-          failed++; errors.push(`Row ${idx}: not an object`);
-          return;
-        }
-        if (!doc.id) {
-          failed++; errors.push(`Row ${idx}: missing "id"`);
-          return;
-        }
-        // optional: backfill modified_date if missing
-        if (!doc.modified_date) {
-          doc.modified_date = new Date().toISOString().slice(0,19).replace('T',' ');
-        }
-        store.put(doc);
-        inserted++;
-      } catch (e: any) {
-        failed++;
-        errors.push(`Row ${idx}: ${e?.message || String(e)}`);
-      }
-    });
-
-    tx.oncomplete = () => resolve({ inserted, failed, errors });
-    tx.onerror = () => resolve({ inserted, failed: failed + (docs.length - inserted - failed), errors: [...errors, String(tx.error)] });
-  });
-}
-
-const handleKnowledgePick = () => knowledgeFileRef.current?.click();
-
-const handleKnowledgeFile = async (f: File) => {
-  setKnowledgeBusy(true);
-  setKnowledgeResult(null);
-  setKnowledgeError(null);
-  try {
-    const text = await f.text();
-    const parsed = JSON.parse(text);
-    const docs = Array.isArray(parsed) ? parsed : [parsed];
-
-    // shape check
-    const normalized = docs.map((d, i) => {
-      if (!d || typeof d !== 'object') throw new Error(`Item ${i} is not an object`);
-      return d as Record<string, any>;
-    });
-
-    const res = await putManyKnowledge(normalized);
-    setKnowledgeResult(res);
-  } catch (e: any) {
-    setKnowledgeError(e?.message || 'Failed to parse or store JSON');
-  } finally {
-    setKnowledgeBusy(false);
-    if (knowledgeFileRef.current) knowledgeFileRef.current.value = '';
-  }
-};
-  // --- End Knowledge JSON upload states/refs ---
-
-  // Initialize IndexedDB
   useEffect(() => {
     const initDB = () => {
       const request = indexedDB.open('VectorDB', 2);
@@ -174,15 +64,10 @@ const handleKnowledgeFile = async (f: File) => {
           const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
           objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
         }
-            // ⬇️ NEW: knowledgeDocs store for your JSON knowledge items
-        if (!db.objectStoreNames.contains('embeddings')) {
-          db.createObjectStore('embeddings', { keyPath: 'id' });
-        }
       };
     };
 
     initDB();
-    loadCachedModels();
 
     return () => {
       if (dbRef.current) {
@@ -233,225 +118,83 @@ const handleKnowledgeFile = async (f: File) => {
     });
   };
 
-  // Load cached models using ModelManager
-  const loadCachedModels = async () => {
-    try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const { ModelManager } = WllamaModule;
-      if (!modelManagerRef.current) {
-        modelManagerRef.current = new ModelManager();
-      }
-      const models = await modelManagerRef.current.getModels();
-      setCachedModels(models.map((m: any) => ({
-        url: m.url,
-        size: m.size,
-        name: m.url.split('/').pop()?.replace('.gguf', '') || 'Unknown'
-      })));
-    } catch (err) {
-      console.error('Failed to load cached models:', err);
-    }
-  };
+  async function putManyKnowledge(docs: any[]): Promise<{ inserted: number; failed: number; errors: string[] }> {
+    if (!dbRef.current) throw new Error('DB not ready');
+    const db = dbRef.current;
 
-  // Delete cached model
-  const deleteCachedModel = async (url: string) => {
-    try {
-      const models = await modelManagerRef.current.getModels();
-      const model = models.find((m: any) => m.url === url);
-      if (model) {
-        await model.remove();
-        await loadCachedModels();
-        setStatus('Model deleted from cache');
-        setTimeout(() => setStatus(''), 3000);
-      }
-    } catch (err: any) {
-      setError('Failed to delete model: ' + (err?.message || String(err)));
-    }
-  };
+    return new Promise((resolve) => {
+      const tx = db.transaction('embeddings', 'readwrite');
+      const store = tx.objectStore('embeddings');
 
-  // Load embedding model using optimized approach
-  const loadModelFromUrl = async () => {
-    if (!modelUrl.trim()) {
-      setError('Please enter a model URL');
-      return;
-    }
+      let inserted = 0;
+      let failed = 0;
+      const errors: string[] = [];
 
-    setLoadingModel(true);
-    setError('');
-    setLoadProgress(0);
-    setStatus('Initializing Wllama...');
-
-    try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const { Wllama, ModelManager } = WllamaModule;
-
-      const CONFIG_PATHS = {
-        'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
-        'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
-      };
-
-      wllamaRef.current = new Wllama(CONFIG_PATHS);
-      
-      if (!modelManagerRef.current) {
-        modelManagerRef.current = new ModelManager();
-      }
-
-      setStatus('Downloading/loading model...');
-
-      // Use ModelManager to handle download and caching
-      const model = await modelManagerRef.current.getModelOrDownload(modelUrl, {
-        progressCallback: ({ loaded, total }: { loaded: number; total: number }) => {
-          if (total) {
-            const progressPercentage = Math.round((loaded / total) * 100);
-            setLoadProgress(progressPercentage);
-            setStatus(`Downloading model... ${progressPercentage}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)`);
+      docs.forEach((doc, idx) => {
+        try {
+          if (!doc || typeof doc !== 'object') {
+            failed++;
+            errors.push(`Row ${idx}: not an object`);
+            return;
           }
-        },
+          if (!doc.id) {
+            failed++;
+            errors.push(`Row ${idx}: missing "id"`);
+            return;
+          }
+          if (!doc.modified_date) {
+            doc.modified_date = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          }
+          store.put(doc);
+          inserted++;
+        } catch (e: any) {
+          failed++;
+          errors.push(`Row ${idx}: ${e?.message || String(e)}`);
+        }
       });
 
-      setStatus('Opening model blobs...');
-      const blobs = await model.open();
+      tx.oncomplete = () => resolve({ inserted, failed, errors });
+      tx.onerror = () => resolve({ inserted, failed: failed + (docs.length - inserted - failed), errors: [...errors, String(tx.error)] });
+    });
+  }
 
-      setStatus('Loading model into runtime...');
-      
-      // Optimized config - simpler is better for large models
-      await wllamaRef.current.loadModel(blobs, {
-        embeddings: true,
-        n_ctx: 2048,
-        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
-      });
+  const handleKnowledgePick = () => knowledgeFileRef.current?.click();
 
-      setStatus('Reading model capabilities...');
-      const metadata = wllamaRef.current.getModelMetadata();
-      const contextInfo = wllamaRef.current.getLoadedContextInfo();
-      
-      setModelCapabilities({
-        n_ctx_train: metadata.hparams.nCtxTrain,
-        n_embd: metadata.hparams.nEmbd,
-        n_vocab: metadata.hparams.nVocab,
-        model_type: metadata.meta['general.architecture'] || 'unknown',
-      });
-      
-      const modelName = modelUrl.split('/').pop() || 'model';
-      setStatus(
-        `✓ Model loaded! ${modelName} - Context: ${contextInfo.n_ctx} tokens, ` +
-        `Embedding: ${metadata.hparams.nEmbd}D`
-      );
-      
-      setLoadProgress(100);
-      setModelLoaded(true);
-      await loadCachedModels();
-    } catch (err: any) {
-      const errorMsg = err?.message || String(err);
-      
-      if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
-        setError(
-          '⚠️ Model too large for browser memory. Try:\n' +
-          '1. Close other tabs to free memory\n' +
-          '2. Use a smaller quantization (Q4_K_M, Q3_K_M)\n' +
-          '3. Restart your browser\n' +
-          '4. Try a different browser (Chrome/Edge recommended)'
-        );
-      } else if (errorMsg.includes('unknown model architecture')) {
-        const arch = errorMsg.match(/unknown model architecture: '([^']+)'/)?.[1];
-        setError(
-          `⚠️ Architecture '${arch}' not supported. Use BERT, LLAMA, or Gemma-based embedding models.`
-        );
-      } else if (errorMsg.includes('out of memory') || errorMsg.includes('OOM')) {
-        setError(
-          '⚠️ Out of memory. Close other applications and tabs, then try again.'
-        );
-      } else {
-        setError('Failed to load model: ' + errorMsg);
-      }
-      setStatus('');
-      console.error(err);
-    } finally {
-      setLoadingModel(false);
-    }
-  };
-
-  // Load from cached model
-  const loadCachedModel = async () => {
-    if (!selectedCachedModel) {
-      setError('Please select a cached model');
-      return;
-    }
-    setModelUrl(selectedCachedModel);
-    await loadModelFromUrl();
-  };
-
-  // Load embedding model from files
-  const loadModelFromFiles = async () => {
-    if (!modelFiles || modelFiles.length === 0) {
-      setError('Please select model file(s)');
-      return;
-    }
-
-    setLoadingModel(true);
-    setError('');
-    setLoadProgress(0);
-    setStatus('Initializing Wllama...');
-
+  const handleKnowledgeFile = async (f: File) => {
+    setKnowledgeBusy(true);
+    setKnowledgeResult(null);
+    setKnowledgeError(null);
     try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const Wllama = WllamaModule.Wllama;
+      const text = await f.text();
+      const parsed = JSON.parse(text);
+      const docs = Array.isArray(parsed) ? parsed : [parsed];
 
-      const CONFIG_PATHS = {
-        'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
-        'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
-      };
-
-      wllamaRef.current = new Wllama(CONFIG_PATHS);
-
-      setStatus('Loading model from files...');
-
-      const blobs = Array.from(modelFiles);
-      
-      // Optimized config
-      await wllamaRef.current.loadModel(blobs, {
-        embeddings: true,
-        n_ctx: 2048,
-        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
+      const normalized = docs.map((d, i) => {
+        if (!d || typeof d !== 'object') throw new Error(`Item ${i} is not an object`);
+        return d as Record<string, any>;
       });
 
-      setStatus('Reading model capabilities...');
-      const metadata = wllamaRef.current.getModelMetadata();
-      const contextInfo = wllamaRef.current.getLoadedContextInfo();
-      
-      setModelCapabilities({
-        n_ctx_train: metadata.hparams.nCtxTrain,
-        n_embd: metadata.hparams.nEmbd,
-        n_vocab: metadata.hparams.nVocab,
-        model_type: metadata.meta['general.architecture'] || 'unknown',
-      });
-      
-      setStatus(
-        `✓ Local model loaded! Context: ${contextInfo.n_ctx} tokens, ` +
-        `Embedding: ${metadata.hparams.nEmbd}D`
-      );
-      
-      setLoadProgress(100);
-      setModelLoaded(true);
-    } catch (err: any) {
-      setError('Failed to load model: ' + (err?.message || String(err)));
-      setStatus('');
-      console.error(err);
+      const res = await putManyKnowledge(normalized);
+      setKnowledgeResult(res);
+      loadDocumentsFromDB();
+    } catch (e: any) {
+      setKnowledgeError(e?.message || 'Failed to parse or store JSON');
     } finally {
-      setLoadingModel(false);
+      setKnowledgeBusy(false);
+      if (knowledgeFileRef.current) knowledgeFileRef.current.value = '';
     }
   };
 
   const generateEmbedding = async (text: string): Promise<number[]> => {
-    if (!wllamaRef.current) {
-      throw new Error('Model not loaded');
+    if (!embeddingModel) {
+      throw new Error('Embedding model not loaded');
     }
     
-    // Enable embeddings mode before creating embeddings
-    if (wllamaRef.current.setOptions) {
-      await wllamaRef.current.setOptions({ embeddings: true });
+    if (embeddingModel.setOptions) {
+      await embeddingModel.setOptions({ embeddings: true });
     }
     
-    const embedding = await wllamaRef.current.createEmbedding(text, {
+    const embedding = await embeddingModel.createEmbedding(text, {
       skipBOS: true,
       skipEOS: true,
     });
@@ -610,240 +353,54 @@ const handleKnowledgeFile = async (f: File) => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 p-6">
       <div className="max-w-6xl mx-auto">
-        <div className="mb-8 flex items-center justify-between">
-          <div>
-            <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
-              <Database className="w-10 h-10" />
-              Vector Embeddings
-            </h1>
-            <p className="text-blue-200">Wllama-powered text embedding with semantic search</p>
-          </div>
-          <a href="/">
-            <button className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2">
-              <Home className="w-4 h-4" />
-              Back to Chat
-            </button>
-          </a>
-        </div>
-
-        {/* Model Loader */}
-        <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6 mb-6">
-          <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-            <Zap className="w-5 h-5" />
-            Load Embedding Model
-          </h2>
-
-          <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-            <p className="text-blue-200 text-sm mb-2">
-              <strong>✅ Now supports larger models (up to 500MB+)!</strong>
-            </p>
-            <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside mb-2">
-              <li><strong>Small models (under 150MB):</strong> bge-base-en-v1.5-q4_k_m.gguf (85MB)</li>
-              <li><strong>Medium models (150-300MB):</strong> nomic-embed-text-v1.5-Q8_0.gguf</li>
-              <li><strong>Large models (300MB+):</strong> embeddinggemma-300M-Q8_0.gguf (default)</li>
-            </ul>
-            <p className="text-green-200 text-xs mt-2">
-              💡 <strong>Optimized loading:</strong> Uses ModelManager with blob loading for better memory efficiency
-            </p>
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
+                <Database className="w-10 h-10" />
+                Vector Embeddings & Knowledge Base
+              </h1>
+              <p className="text-blue-200">Manage documents and perform semantic search</p>
+            </div>
+            <Link href="/">
+              <button className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2">
+                <Home className="w-4 h-4" />
+                Back to Chat
+              </button>
+            </Link>
           </div>
 
-          {/* Load Method Tabs */}
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => setLoadMethod('url')}
-              className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
-                loadMethod === 'url'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white/10 text-blue-200 hover:bg-white/20'
-              }`}
-            >
-              <Globe className="w-4 h-4" />
-              From URL
-            </button>
-            <button
-              onClick={() => setLoadMethod('file')}
-              className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
-                loadMethod === 'file'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white/10 text-blue-200 hover:bg-white/20'
-              }`}
-            >
-              <Upload className="w-4 h-4" />
-              From File
-            </button>
-            <button
-              onClick={() => setLoadMethod('cached')}
-              className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
-                loadMethod === 'cached'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white/10 text-blue-200 hover:bg-white/20'
-              }`}
-            >
-              <Database className="w-4 h-4" />
-              Cached ({cachedModels.length})
-            </button>
-          </div>
-
-          {/* Load from URL */}
-          {loadMethod === 'url' && (
-            <div className="space-y-3">
-              <input
-                type="text"
-                value={modelUrl}
-                onChange={(e) => setModelUrl(e.target.value)}
-                placeholder="https://huggingface.co/.../model.gguf"
-                className="w-full bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={loadModelFromUrl}
-                disabled={loadingModel || modelLoaded || !modelUrl}
-                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-              >
-                {loadingModel ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    Loading... {loadProgress}%
-                  </>
-                ) : modelLoaded ? (
-                  '✓ Model Loaded'
-                ) : (
-                  <>
-                    <Download className="w-5 h-5" />
-                    Download & Load Model
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* Load from File */}
-          {loadMethod === 'file' && (
-            <div className="space-y-3">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".gguf"
-                multiple
-                onChange={(e) => setModelFiles(e.target.files)}
-                className="hidden"
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-              >
-                <Upload className="w-5 h-5" />
-                {modelFiles ? `Selected: ${modelFiles.length} file(s)` : 'Choose Model File(s)'}
-              </button>
-              <button
-                onClick={loadModelFromFiles}
-                disabled={!modelFiles || loadingModel || modelLoaded}
-                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-              >
-                {loadingModel ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    Loading... {loadProgress}%
-                  </>
-                ) : modelLoaded ? (
-                  '✓ Model Loaded'
-                ) : (
-                  <>
-                    <Play className="w-5 h-5" />
-                    Load Model
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* Load from Cached */}
-          {loadMethod === 'cached' && (
-            <div className="space-y-3">
-              {cachedModels.length === 0 ? (
-                <p className="text-blue-200 text-sm text-center py-4">
-                  No cached models. Download one first using URL or File method.
-                </p>
-              ) : (
-                <>
-                  <select
-                    value={selectedCachedModel}
-                    onChange={(e) => setSelectedCachedModel(e.target.value)}
-                    className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="">Select a cached model...</option>
-                    {cachedModels.map((model) => (
-                      <option key={model.url} value={model.url}>
-                        {model.name} ({(model.size / 1024 / 1024).toFixed(1)} MB)
-                      </option>
-                    ))}
-                  </select>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={loadCachedModel}
-                      disabled={!selectedCachedModel || loadingModel || modelLoaded}
-                      className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-                    >
-                      {loadingModel ? (
-                        <>
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          Loading... {loadProgress}%
-                        </>
-                      ) : modelLoaded ? (
-                        '✓ Model Loaded'
-                      ) : (
-                        <>
-                          <Play className="w-5 h-5" />
-                          Load Cached Model
-                        </>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => selectedCachedModel && deleteCachedModel(selectedCachedModel)}
-                      disabled={!selectedCachedModel || loadingModel}
-                      className="bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {status && (
-            <p className="text-blue-300 text-sm mt-2">{status}</p>
-          )}
-
-          {!dbReady && (
-            <p className="text-yellow-300 text-sm mt-2 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              Initializing database...
-            </p>
-          )}
-
-          {/* Model Info Display */}
-          {modelLoaded && modelCapabilities && (
-            <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
-              <h3 className="text-green-300 font-semibold mb-2">Model Information</h3>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="text-blue-200">
-                  <span className="text-white font-medium">Type:</span> {modelCapabilities.model_type}
-                </div>
-                <div className="text-blue-200">
-                  <span className="text-white font-medium">Embedding Dim:</span> {modelCapabilities.n_embd}D
-                </div>
-                <div className="text-blue-200">
-                  <span className="text-white font-medium">Vocabulary:</span> {modelCapabilities.n_vocab.toLocaleString()} tokens
-                </div>
-                <div className="text-blue-200">
-                  <span className="text-white font-medium">Trained Context:</span> {modelCapabilities.n_ctx_train} tokens
+          <div className="bg-white/10 backdrop-blur-lg rounded-xl border border-white/20 p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Sparkles className={`w-6 h-6 ${modelLoaded ? 'text-green-400' : 'text-gray-500'}`} />
+                <div>
+                  <p className={`font-semibold ${modelLoaded ? 'text-green-300' : 'text-yellow-300'}`}>
+                    {modelLoaded ? '✓ Embedding Model Active' : '⚠️ No Embedding Model'}
+                  </p>
+                  <p className="text-sm text-blue-200">
+                    {modelLoaded ? (
+                      <>
+                        {modelCapabilities?.model_type} • {modelCapabilities?.n_embd}D vectors • Ready for operations
+                      </>
+                    ) : (
+                      'Load an embedding model from the chat page Model Manager to enable features'
+                    )}
+                  </p>
                 </div>
               </div>
+              {!modelLoaded && (
+                <Link href="/">
+                  <button className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2">
+                    <Database className="w-4 h-4" />
+                    Go to Model Manager
+                  </button>
+                </Link>
+              )}
             </div>
-          )}
+          </div>
         </div>
 
-        {/* Error Display */}
         {error && (
           <div className="bg-red-500/20 border border-red-400/50 text-red-200 rounded-lg p-4 mb-6 flex items-start gap-2">
             <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
@@ -851,10 +408,14 @@ const handleKnowledgeFile = async (f: File) => {
           </div>
         )}
 
+        {status && (
+          <div className="bg-blue-500/20 border border-blue-400/50 text-blue-200 rounded-lg p-4 mb-6">
+            {status}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Left Column */}
           <div className="space-y-6">
-            {/* Add Document */}
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
               <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
                 <FileText className="w-5 h-5" />
@@ -886,75 +447,73 @@ const handleKnowledgeFile = async (f: File) => {
               </button>
             </div>
 
-            {/* Upload Knowledge JSON -> stores to IndexedDB (knowledgeDocs) */}
-<div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
-  <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-    <Upload className="w-5 h-5" />
-    Upload Knowledge JSON
-  </h2>
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
+              <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                <Upload className="w-5 h-5" />
+                Upload Knowledge JSON
+              </h2>
 
-  <p className="text-blue-200 text-sm mb-3">
-    Accepts an array or single object. Uses store <code className="text-white/90">Embeddings</code> keyed by <code className="text-white/90">id</code>.
-  </p>
+              <p className="text-blue-200 text-sm mb-3">
+                Accepts an array or single object. Uses store <code className="text-white/90">embeddings</code> keyed by <code className="text-white/90">id</code>.
+              </p>
 
-  <input
-    ref={knowledgeFileRef}
-    type="file"
-    accept="application/json,.json"
-    className="hidden"
-    onChange={(e) => {
-      const f = e.target.files?.[0];
-      if (f) void handleKnowledgeFile(f);
-    }}
-  />
+              <input
+                ref={knowledgeFileRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleKnowledgeFile(f);
+                }}
+              />
 
-  <button
-    onClick={handleKnowledgePick}
-    disabled={!dbReady || knowledgeBusy}
-    className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
-  >
-    {knowledgeBusy ? (
-      <>
-        <Loader2 className="w-5 h-5 animate-spin" />
-        Saving…
-      </>
-    ) : (
-      <>
-        <Upload className="w-5 h-5" />
-        Select .json & Save to DB
-      </>
-    )}
-  </button>
+              <button
+                onClick={handleKnowledgePick}
+                disabled={!dbReady || knowledgeBusy}
+                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                {knowledgeBusy ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <Upload className="w-5 h-5" />
+                    Select .json & Save to DB
+                  </>
+                )}
+              </button>
 
-  {/* Inline feedback */}
-  {knowledgeResult && (
-    <div className="mt-3 text-sm text-green-200">
-      Saved <b>{knowledgeResult.inserted}</b>
-      {knowledgeResult.failed ? <> • Failed <b>{knowledgeResult.failed}</b></> : null}
-      {knowledgeResult.errors?.length ? (
-        <details className="mt-2">
-          <summary className="cursor-pointer text-red-200">Errors</summary>
-          <ul className="list-disc list-inside text-red-200">
-            {knowledgeResult.errors.slice(0,10).map((e, i) => <li key={i}>{e}</li>)}
-          </ul>
-          {knowledgeResult.errors.length > 10 && (
-            <p className="text-red-300 mt-1">…and {knowledgeResult.errors.length - 10} more</p>
-          )}
-        </details>
-      ) : null}
-    </div>
-  )}
+              {knowledgeResult && (
+                <div className="mt-3 text-sm text-green-200">
+                  Saved <b>{knowledgeResult.inserted}</b>
+                  {knowledgeResult.failed ? <> • Failed <b>{knowledgeResult.failed}</b></> : null}
+                  {knowledgeResult.errors?.length ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-red-200">Errors</summary>
+                      <ul className="list-disc list-inside text-red-200">
+                        {knowledgeResult.errors.slice(0, 10).map((e, i) => (
+                          <li key={i}>{e}</li>
+                        ))}
+                      </ul>
+                      {knowledgeResult.errors.length > 10 && (
+                        <p className="text-red-300 mt-1">…and {knowledgeResult.errors.length - 10} more</p>
+                      )}
+                    </details>
+                  ) : null}
+                </div>
+              )}
 
-  {knowledgeError && (
-    <div className="mt-3 text-sm text-red-200 flex items-start gap-2">
-      <AlertCircle className="w-4 h-4 mt-0.5" />
-      <span className="whitespace-pre-wrap">{knowledgeError}</span>
-    </div>
-  )}
-</div>
+              {knowledgeError && (
+                <div className="mt-3 text-sm text-red-200 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 mt-0.5" />
+                  <span className="whitespace-pre-wrap">{knowledgeError}</span>
+                </div>
+              )}
+            </div>
 
-
-            {/* Search */}
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
               <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
                 <Search className="w-5 h-5" />
@@ -988,7 +547,6 @@ const handleKnowledgeFile = async (f: File) => {
               </button>
             </div>
 
-            {/* Database Actions */}
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
               <h2 className="text-xl font-bold text-white mb-4">Database Actions</h2>
               <div className="grid grid-cols-2 gap-3">
@@ -1022,9 +580,7 @@ const handleKnowledgeFile = async (f: File) => {
             </div>
           </div>
 
-          {/* Right Column */}
           <div>
-            {/* Search Results */}
             {searchResults.length > 0 && (
               <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6 mb-6">
                 <h2 className="text-xl font-bold text-white mb-4">
@@ -1059,7 +615,6 @@ const handleKnowledgeFile = async (f: File) => {
               </div>
             )}
 
-            {/* All Documents */}
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
               <h2 className="text-xl font-bold text-white mb-4">
                 All Documents ({documents.length})
