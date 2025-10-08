@@ -635,16 +635,13 @@ const handleKnowledgeFile = async (f: File) => {
 
           <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
             <p className="text-blue-200 text-sm mb-2">
-              <strong>✅ Now supports larger models (up to 500MB+)!</strong>
+              <strong>Example models:</strong>
             </p>
             <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside mb-2">
-              <li><strong>Small models (under 150MB):</strong> bge-base-en-v1.5-q4_k_m.gguf (85MB)</li>
+              <li><strong>Small models (under 150MB):</strong> bge-base-en-v1.5-q4_k_m.gguf</li>
               <li><strong>Medium models (150-300MB):</strong> nomic-embed-text-v1.5-Q8_0.gguf</li>
               <li><strong>Large models (300MB+):</strong> embeddinggemma-300M-Q8_0.gguf (default)</li>
             </ul>
-            <p className="text-green-200 text-xs mt-2">
-              💡 <strong>Optimized loading:</strong> Uses ModelManager with blob loading for better memory efficiency
-            </p>
           </div>
 
           {/* Load Method Tabs */}
