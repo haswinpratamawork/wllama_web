@@ -23,6 +23,7 @@ interface Wllama {
   loadModel: (blobs: File[], config: WllamaConfig) => Promise<void>;
   createCompletion: (prompt: string, options: any) => Promise<string>;
   createEmbedding: (text: string, options?: { skipBOS?: boolean; skipEOS?: boolean }) => Promise<number[]>;
+  setOptions?: (options: { embeddings: boolean }) => Promise<void>;
 }
 
 interface Message {
@@ -188,7 +189,17 @@ export default function WllamaUI() {
     }
 
     try {
+      // Enable embeddings mode
+      if (embeddingModel.setOptions) {
+        await embeddingModel.setOptions({ embeddings: true });
+      }
+
       const queryEmbedding = await embeddingModel.createEmbedding(query);
+
+      // Switch back to generation mode
+      if (embeddingModel.setOptions) {
+        await embeddingModel.setOptions({ embeddings: false });
+      }
 
       const transaction = embeddingDbRef.current.transaction(['embeddings'], 'readonly');
       const objectStore = transaction.objectStore('embeddings');
@@ -213,6 +224,14 @@ export default function WllamaUI() {
       });
     } catch (err) {
       console.error('Error retrieving documents:', err);
+      // Switch back to generation mode even on error
+      if (embeddingModel?.setOptions) {
+        try {
+          await embeddingModel.setOptions({ embeddings: false });
+        } catch (e) {
+          console.error('Failed to reset embeddings mode:', e);
+        }
+      }
       return [];
     }
   };
@@ -726,8 +745,6 @@ export default function WllamaUI() {
     }
 
     try {
-      const formattedPrompt = buildConversationPrompt(messages, userMessage, ragContext);
-
       const assistantMessageIndex = messages.length + 1;
 
       setConversations(prev => prev.map(conv => {
@@ -744,6 +761,9 @@ export default function WllamaUI() {
         }
         return conv;
       }));
+
+      // Build the prompt here
+      const formattedPrompt = buildConversationPrompt(messages, userMessage, ragContext.length > 0 ? ragContext : undefined);
 
       let fullContent = '';
       let displayContent = '';
@@ -863,12 +883,13 @@ export default function WllamaUI() {
             <HardDrive className="w-4 h-4" />
             Manage models
           </button>
-          <a href="/embedding">
-            <button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2">
-              <Database className="w-4 h-4" />
-              Vector Embeddings
-            </button>
-          </a>
+          <button 
+            onClick={() => window.location.href = '/embedding'}
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
+          >
+            <Database className="w-4 h-4" />
+            Vector Embeddings
+          </button>
           
           <div className="mt-3 p-3 bg-white/5 rounded-lg border border-white/10">
             <div className="flex items-center justify-between mb-2">

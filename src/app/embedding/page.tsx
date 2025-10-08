@@ -21,6 +21,7 @@ interface SearchResult {
 interface Wllama {
   loadModel: (blobs: Blob[], config: any) => Promise<void>;
   createEmbedding: (text: string, options?: { skipBOS?: boolean; skipEOS?: boolean }) => Promise<number[]>;
+  setOptions?: (options: { embeddings: boolean }) => Promise<void>;
   getModelMetadata: () => ModelMetadata;
   getLoadedContextInfo: () => LoadedContextInfo;
 }
@@ -366,10 +367,17 @@ export default function EmbeddingPage() {
     if (!wllamaRef.current) {
       throw new Error('Model not loaded');
     }
+    
+    // Enable embeddings mode before creating embeddings
+    if (wllamaRef.current.setOptions) {
+      await wllamaRef.current.setOptions({ embeddings: true });
+    }
+    
     const embedding = await wllamaRef.current.createEmbedding(text, {
       skipBOS: true,
       skipEOS: true,
     });
+    
     return embedding;
   };
 
