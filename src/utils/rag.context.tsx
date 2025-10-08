@@ -154,14 +154,14 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
 
   const ensureIndex = async (dim: number) => {
     if (dim <= 0 || !Number.isFinite(dim)) {
-      throw new Error('Dimensi embedding tidak valid untuk indeks USearch');
+      throw new Error('Dimensi embedding tidak valid untuk indeks HNSW');
     }
     const existing = indexRef.current;
     if (!existing || existing.dimensions !== dim) {
-      console.info('[RagContext] Membuat indeks USearch baru', { dim });
+      console.info('[RagContext] Membuat indeks HNSW baru', { dim });
       indexRef.current = await USearchIndex.create(dim);
     } else {
-      console.info('[RagContext] Membersihkan indeks USearch lama', { dim });
+      console.info('[RagContext] Membersihkan indeks HNSW lama', { dim });
       existing.clear();
     }
     return indexRef.current!;
@@ -170,7 +170,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
   const rebuildIndex = (records: KnowledgeItem[]) => {
     const previous = indexReadyRef.current.catch(() => {});
     const promise = previous.then(async () => {
-      console.info('[RagContext] Rebuild indeks USearch dimulai', {
+      console.info('[RagContext] Rebuild indeks HNSW dimulai', {
         total: records.length,
       });
       if (!records.length) {
@@ -194,11 +194,11 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
         itemMapRef.current.set(item.id, item);
       }
       index.addMany(validEntries);
-      console.info('[RagContext] Rebuild indeks USearch selesai', {
+      console.info('[RagContext] Rebuild indeks HNSW selesai', {
         indexed: validEntries.length,
       });
     }).catch((err) => {
-      console.error('[RagContext] Failed to rebuild USearch index', err);
+      console.error('[RagContext] Failed to rebuild HNSW index', err);
       throw err;
     });
     indexReadyRef.current = promise;
@@ -371,7 +371,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     try {
       await indexReadyRef.current;
     } catch (err) {
-      console.error('[RagContext] Gagal menyiapkan indeks USearch', err);
+      console.error('[RagContext] Gagal menyiapkan indeks HNSW', err);
       throw err;
     }
   };
@@ -383,7 +383,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     await waitForIndexReady();
     const index = indexRef.current;
     if (!index) {
-      console.warn('[RagContext] Pencarian dibatalkan: indeks USearch belum siap');
+      console.warn('[RagContext] Pencarian dibatalkan: indeks HNSW belum siap');
       setLatestHits([]);
       return [];
     }
@@ -409,7 +409,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
       }
     }
     setLatestHits(mapped);
-    console.info('[RagContext] Hasil pencarian USearch', {
+    console.info('[RagContext] Hasil pencarian HNSW', {
       hits: mapped.length,
     });
     return mapped;

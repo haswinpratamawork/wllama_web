@@ -1,3 +1,6 @@
+import type { HierarchicalNSW, HnswlibModule } from 'hnswlib-wasm';
+import { loadHnswlib } from 'hnswlib-wasm';
+
 type UFloatVector = Float32Array | Float64Array | number[];
 
 export interface USearchMatch {
@@ -6,68 +9,24 @@ export interface USearchMatch {
   distance: number;
 }
 
-type USearchModule = typeof import('usearch');
-type MetricKindValue = USearchModule['MetricKind'][keyof USearchModule['MetricKind']];
+const SPACE = 'cosine' as const;
+const DEFAULT_CAPACITY = 64;
+const DEFAULT_M = 16;
+const DEFAULT_EF_CONSTRUCTION = 200;
+const DEFAULT_RANDOM_SEED = 100;
+const DEFAULT_EF_SEARCH = 64;
+const AUTO_SAVE_FILENAME = 'rag-hnsw-index.bin';
 
-const resolveUSearchModule = (mod: any): USearchModule => {
-  const candidate = mod?.default?.Index ? mod.default : mod;
-  if (!candidate?.Index) {
-    throw new Error('USearch module tidak valid: export Index tidak ditemukan');
-  }
-  return candidate as USearchModule;
-};
-
-let usearchModulePromise: Promise<USearchModule> | null = null;
-
-const isNodeRuntime = () => {
-  const maybeProcess = (globalThis as any)?.process;
-  return (
-    typeof maybeProcess === 'object' &&
-    typeof maybeProcess?.versions === 'object' &&
-    typeof maybeProcess?.versions?.node === 'string'
-  );
-};
-
-const loadUSearchModule = async (): Promise<USearchModule> => {
-  if (!usearchModulePromise) {
-    usearchModulePromise = (async () => {
-      if (!isNodeRuntime()) {
-        throw new Error('USearch native bindings hanya tersedia di lingkungan Node');
-      }
-      const dynamicImport = new Function(
-        'specifier',
-        'return import(specifier);'
-      ) as (specifier: string) => Promise<unknown>;
-      const mod = await dynamicImport('usearch');
-      return resolveUSearchModule(mod);
-    })().catch((err) => {
-      usearchModulePromise = null;
-      throw err;
-    });
-  }
-  return usearchModulePromise;
-};
-
-const toBigUint64 = (id: number) => {
-  if (!Number.isFinite(id) || id < 0) {
-    throw new Error('USearchIndex key must be bilangan bulat positif');
-  }
-  if (!Number.isInteger(id)) {
-    throw new Error('USearchIndex key harus bilangan bulat');
-  }
-  return BigInt(id);
-};
-
-const toFlatVector = (vector: UFloatVector, dim: number): Float32Array => {
+const toFloat32 = (vector: UFloatVector, expected: number): Float32Array => {
   const arr =
     vector instanceof Float32Array
       ? vector
       : vector instanceof Float64Array
       ? Float32Array.from(vector)
       : Float32Array.from(vector);
-  if (arr.length !== dim) {
+  if (arr.length !== expected) {
     throw new Error(
-      `Vector dimension mismatch: expected ${dim}, got ${arr.length}`
+      `Vector dimension mismatch: expected ${expected}, got ${arr.length}`
     );
   }
   return arr;
@@ -84,153 +43,242 @@ const cosineSimilarity = (a: Float32Array, b: Float32Array): number => {
     normA += va * va;
     normB += vb * vb;
   }
-  if (normA === 0 || normB === 0) {
-    return 0;
-  }
+  if (normA === 0 || normB === 0) return 0;
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+};
+
+const loadLibrary = async (): Promise<HnswlibModule | null> => {
+  try {
+    return await loadHnswlib('IDBFS');
+  } catch (err) {
+    console.error('[HNSW] Gagal memuat WASM hnswlib, fallback ke cosine search', err);
+    return null;
+  }
 };
 
 export class USearchIndex {
   readonly dimensions: number;
-  private module: USearchModule | null;
-  private index: InstanceType<USearchModule['Index']> | null;
-  private readonly metric: MetricKindValue | 'cos';
-  private readonly fallbackVectors: Map<number, Float32Array> | null;
 
-  private constructor(
-    module: USearchModule | null,
-    dimensions: number,
-    metric: MetricKindValue | 'cos'
-  ) {
+  private readonly lib: HnswlibModule | null;
+  private index: HierarchicalNSW | null;
+  private capacity: number;
+  private readonly vectorStore = new Map<number, Float32Array>(); // external id -> vector
+  private readonly externalToInternal = new Map<number, number>();
+  private readonly internalToExternal = new Map<number, number>();
+  private nextLabel = 0;
+  private freeLabels: number[] = [];
+
+  private constructor(lib: HnswlibModule | null, dimensions: number) {
     if (!Number.isFinite(dimensions) || dimensions <= 0) {
       throw new Error('USearchIndex requires a positive dimension');
     }
-    this.module = module;
-    this.metric = metric;
     this.dimensions = Math.floor(dimensions);
-
-    if (module) {
-      this.index = this.createNativeIndex();
-      this.fallbackVectors = null;
-    } else {
-      console.warn(
-        '[USearch] Modul native tidak tersedia, fallback ke cosine search'
-      );
-      this.index = null;
-      this.fallbackVectors = new Map();
-    }
+    this.lib = lib;
+    this.capacity = DEFAULT_CAPACITY;
+    this.index = this.lib ? this.createNativeIndex(DEFAULT_CAPACITY) : null;
   }
 
-  static async create(
-    dimensions: number,
-    options?: { metric?: MetricKindValue }
-  ) {
-    let module: USearchModule | null = null;
-    try {
-      module = await loadUSearchModule();
-    } catch (err) {
-      console.error('[USearch] Gagal memuat modul native', err);
-    }
-    const metric = module
-      ? options?.metric ?? module.MetricKind.Cos
-      : 'cos';
-    return new USearchIndex(module, dimensions, metric);
+  static async create(dimensions: number) {
+    const lib = await loadLibrary();
+    return new USearchIndex(lib, dimensions);
   }
 
-  private createNativeIndex() {
-    if (!this.module) {
-      throw new Error('USearch native module tidak tersedia');
+  private createNativeIndex(initialCapacity: number): HierarchicalNSW {
+    if (!this.lib) {
+      throw new Error('Native HNSW lib is unavailable');
     }
-    return new this.module.Index(this.dimensions, this.metric as MetricKindValue);
+    const idx = new this.lib.HierarchicalNSW(
+      SPACE,
+      this.dimensions,
+      AUTO_SAVE_FILENAME
+    );
+    idx.initIndex(initialCapacity, DEFAULT_M, DEFAULT_EF_CONSTRUCTION, DEFAULT_RANDOM_SEED);
+    idx.setEfSearch(DEFAULT_EF_SEARCH);
+    this.capacity = initialCapacity;
+    return idx;
+  }
+
+  private ensureIndex(): HierarchicalNSW {
+    if (!this.index) {
+    this.index = this.createNativeIndex(Math.max(DEFAULT_CAPACITY, this.vectorStore.size || 1));
+    for (const [externalId, vector] of this.vectorStore.entries()) {
+      const label = this.externalToInternal.get(externalId);
+      if (label === undefined) continue;
+      this.addNativePoint(vector, label);
+    }
+    }
+    return this.index;
   }
 
   clear() {
-    if (this.index) {
-      this.index = this.createNativeIndex();
+    this.vectorStore.clear();
+    this.externalToInternal.clear();
+    this.internalToExternal.clear();
+    this.freeLabels = [];
+    this.nextLabel = 0;
+    if (this.lib) {
+      this.index = this.createNativeIndex(DEFAULT_CAPACITY);
     } else {
-      this.fallbackVectors?.clear();
+      this.index = null;
     }
   }
 
   has(id: number): boolean {
-    if (this.index) {
-      return Boolean(this.index.contains(toBigUint64(id)));
-    }
-    return this.fallbackVectors?.has(id) ?? false;
+    return this.externalToInternal.has(id);
   }
 
   remove(id: number) {
+    const label = this.externalToInternal.get(id);
+    if (label === undefined) return;
+    this.vectorStore.delete(id);
+    this.externalToInternal.delete(id);
+    this.internalToExternal.delete(label);
+    this.freeLabels.push(label);
     if (this.index) {
-      this.index.remove(toBigUint64(id));
-    } else {
-      this.fallbackVectors?.delete(id);
+      try {
+        this.index.markDelete(label);
+      } catch (err) {
+        console.warn('[HNSW] markDelete gagal', err);
+      }
     }
   }
 
   size() {
-    if (this.index) {
-      return Number(this.index.size());
+    return this.vectorStore.size;
+  }
+
+  private ensureCapacity(required: number) {
+    if (!this.index) return;
+    if (required <= this.capacity) return;
+    const newCapacity = Math.max(required, Math.ceil(this.capacity * 1.5));
+    try {
+      this.index.resizeIndex(newCapacity);
+      this.capacity = newCapacity;
+    } catch (err) {
+      console.warn('[HNSW] resizeIndex gagal, akan membuat ulang indeks', err);
+      this.rebuildNativeIndex();
     }
-    return this.fallbackVectors?.size ?? 0;
+  }
+
+  private rebuildNativeIndex() {
+    if (!this.lib) return;
+    const count = this.vectorStore.size || 1;
+    this.index = this.createNativeIndex(Math.max(DEFAULT_CAPACITY, count));
+    for (const [externalId, vector] of this.vectorStore.entries()) {
+      const label = this.externalToInternal.get(externalId);
+      if (label === undefined) continue;
+      this.addNativePoint(vector, label);
+    }
+  }
+
+  private allocateLabel(): number {
+    if (this.freeLabels.length) return this.freeLabels.pop()!;
+    const label = this.nextLabel;
+    this.nextLabel += 1;
+    return label;
+  }
+
+  private bindLabel(externalId: number): number {
+    const existing = this.externalToInternal.get(externalId);
+    if (existing !== undefined) return existing;
+    const label = this.allocateLabel();
+    this.externalToInternal.set(externalId, label);
+    this.internalToExternal.set(label, externalId);
+    return label;
+  }
+
+  private addNativePoint(vector: Float32Array, label: number) {
+    const idx = this.ensureIndex();
+    this.ensureCapacity(this.vectorStore.size);
+    try {
+      idx.addPoint(vector, label, true);
+    } catch (err) {
+      console.warn('[HNSW] addPoint gagal, akan rebuild', err);
+      this.rebuildNativeIndex();
+      this.ensureIndex().addPoint(vector, label, true);
+    }
   }
 
   add(id: number, vector: UFloatVector) {
-    const vec = toFlatVector(vector, this.dimensions);
+    const arr = toFloat32(vector, this.dimensions);
+    const label = this.bindLabel(id);
+    this.vectorStore.set(id, Float32Array.from(arr));
     if (this.index) {
-      const key = toBigUint64(id);
-      this.index.add(key, vec, 0);
-    } else {
-      this.fallbackVectors?.set(Number(id), vec);
+      try {
+        this.index.markDelete(label);
+      } catch {
+        // ignore
+      }
+    }
+    if (this.lib) {
+      this.addNativePoint(arr, label);
     }
   }
 
   addMany(entries: { id: number; vector: UFloatVector }[]) {
     if (!entries.length) return;
-    if (this.index) {
-      const keys = new BigUint64Array(entries.length);
-      const vectors = new Float32Array(entries.length * this.dimensions);
-      for (let i = 0; i < entries.length; i += 1) {
-        const { id, vector } = entries[i];
-        keys[i] = toBigUint64(id);
-        const vec = toFlatVector(vector, this.dimensions);
-        vectors.set(vec, i * this.dimensions);
+    const converted: { label: number; arr: Float32Array }[] = [];
+    for (const { id, vector } of entries) {
+      const arr = toFloat32(vector, this.dimensions);
+      const label = this.bindLabel(id);
+      this.vectorStore.set(id, Float32Array.from(arr));
+      if (this.index) {
+        try {
+          this.index.markDelete(label);
+        } catch {
+          // ignore
+        }
       }
-      this.index.add(keys, vectors, 0);
-    } else {
-      for (const { id, vector } of entries) {
-        const vec = toFlatVector(vector, this.dimensions);
-        this.fallbackVectors?.set(Number(id), vec);
-      }
+      converted.push({ label, arr });
+    }
+
+    if (!this.lib) return;
+    const idx = this.ensureIndex();
+    this.ensureCapacity(this.vectorStore.size);
+    const vectors = converted.map(({ arr }) => arr);
+    const labels = converted.map(({ label }) => label);
+    try {
+      idx.addPoints(vectors, labels, true);
+    } catch (err) {
+      console.warn('[HNSW] addPoints gagal, rebuild seluruh indeks', err);
+      this.rebuildNativeIndex();
     }
   }
 
   search(query: UFloatVector, k: number): USearchMatch[] {
-    const total = this.size();
-    if (total === 0) return [];
-    const q = toFlatVector(query, this.dimensions);
-    const normalizedK = Math.max(1, Math.min(Math.floor(k) || 1, total));
+    const total = this.vectorStore.size;
+    if (!total) return [];
+    const arr = toFloat32(query, this.dimensions);
+    const topK = Math.max(1, Math.min(Math.floor(k) || 1, total));
 
     if (this.index) {
-      const matches = this.index.search(q, normalizedK, 0);
-      const { keys, distances } = matches;
-      const results: USearchMatch[] = [];
-      for (let i = 0; i < keys.length; i += 1) {
-        const distance = distances[i];
-        const id = Number(keys[i]);
-        const score = 1 - distance;
-        results.push({ id, score, distance });
+      try {
+        const result = this.index.searchKnn(arr, topK, undefined);
+        const matches: USearchMatch[] = [];
+        const { neighbors, distances } = result;
+        for (let i = 0; i < neighbors.length; i += 1) {
+          const label = neighbors[i];
+          if (label === -1) continue;
+          const externalId = this.internalToExternal.get(label);
+          if (externalId === undefined) continue;
+          const distance = distances[i];
+          const score = 1 - distance;
+          matches.push({ id: externalId, score, distance });
+        }
+        return matches;
+      } catch (err) {
+        console.warn('[HNSW] searchKnn gagal, fallback ke cosine search', err);
+        this.index = null;
       }
-      return results;
     }
 
     const results: USearchMatch[] = [];
-    if (!this.fallbackVectors) return results;
-    for (const [id, vec] of this.fallbackVectors.entries()) {
-      const score = cosineSimilarity(q, vec);
+    for (const [externalId, vec] of this.vectorStore.entries()) {
+      const score = cosineSimilarity(arr, vec);
       const distance = 1 - score;
-      results.push({ id, score, distance });
+      results.push({ id: externalId, score, distance });
     }
     results.sort((a, b) => a.distance - b.distance);
-    return results.slice(0, normalizedK);
+    return results.slice(0, topK);
   }
 }
