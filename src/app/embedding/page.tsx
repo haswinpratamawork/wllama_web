@@ -79,10 +79,84 @@ export default function EmbeddingPage() {
   const dbRef = useRef<IDBDatabase | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // --- Knowledge JSON upload states/refs ---
+const knowledgeFileRef = useRef<HTMLInputElement | null>(null);
+const [knowledgeBusy, setKnowledgeBusy] = useState(false);
+const [knowledgeResult, setKnowledgeResult] = useState<{ inserted: number; failed: number; errors: string[] } | null>(null);
+const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+
+// Save many knowledge docs into 'knowledgeDocs'
+async function putManyKnowledge(docs: any[]): Promise<{ inserted: number; failed: number; errors: string[] }> {
+  if (!dbRef.current) throw new Error('DB not ready');
+  const db = dbRef.current;
+
+  return new Promise((resolve) => {
+    const tx = db.transaction('embeddings', 'readwrite');
+    const store = tx.objectStore('embeddings');
+
+    let inserted = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    docs.forEach((doc, idx) => {
+      try {
+        if (!doc || typeof doc !== 'object') {
+          failed++; errors.push(`Row ${idx}: not an object`);
+          return;
+        }
+        if (!doc.id) {
+          failed++; errors.push(`Row ${idx}: missing "id"`);
+          return;
+        }
+        // optional: backfill modified_date if missing
+        if (!doc.modified_date) {
+          doc.modified_date = new Date().toISOString().slice(0,19).replace('T',' ');
+        }
+        store.put(doc);
+        inserted++;
+      } catch (e: any) {
+        failed++;
+        errors.push(`Row ${idx}: ${e?.message || String(e)}`);
+      }
+    });
+
+    tx.oncomplete = () => resolve({ inserted, failed, errors });
+    tx.onerror = () => resolve({ inserted, failed: failed + (docs.length - inserted - failed), errors: [...errors, String(tx.error)] });
+  });
+}
+
+const handleKnowledgePick = () => knowledgeFileRef.current?.click();
+
+const handleKnowledgeFile = async (f: File) => {
+  setKnowledgeBusy(true);
+  setKnowledgeResult(null);
+  setKnowledgeError(null);
+  try {
+    const text = await f.text();
+    const parsed = JSON.parse(text);
+    const docs = Array.isArray(parsed) ? parsed : [parsed];
+
+    // shape check
+    const normalized = docs.map((d, i) => {
+      if (!d || typeof d !== 'object') throw new Error(`Item ${i} is not an object`);
+      return d as Record<string, any>;
+    });
+
+    const res = await putManyKnowledge(normalized);
+    setKnowledgeResult(res);
+  } catch (e: any) {
+    setKnowledgeError(e?.message || 'Failed to parse or store JSON');
+  } finally {
+    setKnowledgeBusy(false);
+    if (knowledgeFileRef.current) knowledgeFileRef.current.value = '';
+  }
+};
+
+
   // Initialize IndexedDB
   useEffect(() => {
     const initDB = () => {
-      const request = indexedDB.open('VectorDB', 1);
+      const request = indexedDB.open('VectorDB', 2);
 
       request.onerror = () => {
         setError('Failed to open IndexedDB');
@@ -100,6 +174,10 @@ export default function EmbeddingPage() {
           const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
           objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
         }
+        if (!db.objectStoreNames.contains('embeddings')) {
+        db.createObjectStore('embeddings', { keyPath: 'id' });
+        // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
+      }
       };
     };
 
@@ -806,6 +884,80 @@ export default function EmbeddingPage() {
                   </>
                 )}
               </button>
+            </div>
+
+          {/* Add Upload Documents */}
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
+              <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                <FileText className="w-5 h-5" />
+                Add Document
+              </h2>
+              {/* Upload Knowledge JSON -> stores to IndexedDB (knowledgeDocs) */}
+              <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-6">
+                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  <Upload className="w-5 h-5" />
+                  Upload Knowledge JSON
+                </h2>
+
+                <p className="text-blue-200 text-sm mb-3">
+                  Accepts an array or single object. Uses store <code className="text-white/90">knowledgeDocs</code> keyed by <code className="text-white/90">id</code>.
+                </p>
+
+                <input
+                  ref={knowledgeFileRef}
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void handleKnowledgeFile(f);
+                  }}
+                />
+
+                <button
+                  onClick={handleKnowledgePick}
+                  disabled={!dbReady || knowledgeBusy}
+                  className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  {knowledgeBusy ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Saving…
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-5 h-5" />
+                      Select .json & Save to DB
+                    </>
+                  )}
+                </button>
+
+                {/* Inline feedback */}
+                {knowledgeResult && (
+                  <div className="mt-3 text-sm text-green-200">
+                    Saved <b>{knowledgeResult.inserted}</b>
+                    {knowledgeResult.failed ? <> • Failed <b>{knowledgeResult.failed}</b></> : null}
+                    {knowledgeResult.errors?.length ? (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-red-200">Errors</summary>
+                        <ul className="list-disc list-inside text-red-200">
+                          {knowledgeResult.errors.slice(0,10).map((e, i) => <li key={i}>{e}</li>)}
+                        </ul>
+                        {knowledgeResult.errors.length > 10 && (
+                          <p className="text-red-300 mt-1">…and {knowledgeResult.errors.length - 10} more</p>
+                        )}
+                      </details>
+                    ) : null}
+                  </div>
+                )}
+
+                {knowledgeError && (
+                  <div className="mt-3 text-sm text-red-200 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 mt-0.5" />
+                    <span className="whitespace-pre-wrap">{knowledgeError}</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Search */}
