@@ -9,10 +9,10 @@ interface EmbeddingDocument {
   id: string;
   text: string;
   embedding: number[];
-  metadata?: {
-    source?: string;
-    timestamp: number;
-  };
+  // metadata?: {
+  //   source?: string;
+  //   timestamp: number;
+  // };
 }
 
 interface SearchResult {
@@ -62,7 +62,8 @@ export default function EmbeddingPage() {
         const db = (event.target as IDBOpenDBRequest).result;
         if (!db.objectStoreNames.contains('embeddings')) {
           const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
-          objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
+          // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
+          // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
         }
       };
     };
@@ -238,9 +239,9 @@ export default function EmbeddingPage() {
         id: `${Date.now()}`,
         text: inputText,
         embedding: embedding,
-        metadata: {
-          timestamp: Date.now(),
-        },
+        // metadata: {
+        //   timestamp: Date.now(),
+        // },
       };
 
       await saveDocumentToDB(doc);
@@ -604,11 +605,11 @@ export default function EmbeddingPage() {
                         </button>
                       </div>
                       <p className="text-white text-sm">{result.document.text}</p>
-                      {result.document.metadata?.source && (
+                      {/* {result.document.metadata?.source && (
                         <p className="text-blue-300 text-xs mt-2">
                           {result.document.metadata.source}
                         </p>
-                      )}
+                      )} */}
                     </div>
                   ))}
                 </div>
@@ -630,7 +631,7 @@ export default function EmbeddingPage() {
                     >
                       <div className="flex items-start justify-between mb-2">
                         <span className="text-blue-300 text-xs">
-                          {new Date(doc.metadata?.timestamp || 0).toLocaleString()}
+                          {/* {new Date(doc.metadata?.timestamp || 0).toLocaleString()} */}
                         </span>
                         <button
                           onClick={() => handleDelete(doc.id)}
@@ -644,11 +645,11 @@ export default function EmbeddingPage() {
                         <p className="text-blue-300 text-xs">
                           Vector: {doc.embedding.length}D
                         </p>
-                        {doc.metadata?.source && (
+                        {/* {doc.metadata?.source && (
                           <p className="text-purple-300 text-xs">
                             {doc.metadata.source}
                           </p>
-                        )}
+                        )} */}
                       </div>
                     </div>
                   ))

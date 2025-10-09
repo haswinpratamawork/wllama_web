@@ -154,7 +154,7 @@ export default function WllamaUI() {
       const db = (event.target as IDBOpenDBRequest).result;
       if (!db.objectStoreNames.contains('embeddings')) {
         const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
-        objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
+        // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
       }
     };
   };
