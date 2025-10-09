@@ -1,8 +1,4 @@
-interface Wllama {
-  loadModelFromUrl: (url: string, config: any) => Promise<void>;
-  loadModel: (blobs: File[], config: any) => Promise<void>;
-  createCompletion: (prompt: string, options: any) => Promise<string>;
-}
+import type { Wllama } from '@/types/wllama';
 
 class ChatModelManagerClass {
   private model: Wllama | null = null;

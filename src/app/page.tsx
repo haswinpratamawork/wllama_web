@@ -2,63 +2,18 @@
 
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-// import { ChatModelManager } from '@/lib/chatModelManager';
 import { useEmbeddingModel } from '@/hooks/useEmbeddingModel';
+import { ChatModelManager } from '@/lib/chatModelManager';
+import type { 
+  Wllama, 
+  WllamaConfig, 
+  ProgressCallback, 
+  Message, 
+  Conversation, 
+  CachedModel, 
+  EmbeddingDocument 
+} from '@/types/wllama';
 import { Upload, Play, Loader2, Send, Trash2, User, Bot, Download, Save, Plus, MessageSquare, Menu, X, Globe, HardDrive, Database, BookOpen, Sparkles, FileStack, Check } from 'lucide-react';
-
-interface ProgressCallback {
-  loaded: number;
-  total: number;
-}
-
-interface WllamaConfig {
-  n_ctx: number;
-  n_batch: number;
-  n_threads: number;
-  n_gpu_layers: number;
-  use_mlock: boolean;
-  use_mmap: boolean;
-  progressCallback: (progress: ProgressCallback) => void;
-}
-
-interface Wllama {
-  loadModelFromUrl: (url: string, config: WllamaConfig) => Promise<void>;
-  loadModel: (blobs: File[], config: WllamaConfig) => Promise<void>;
-  createCompletion: (prompt: string, options: any) => Promise<string>;
-  createEmbedding: (text: string, options?: { skipBOS?: boolean; skipEOS?: boolean }) => Promise<number[]>;
-  setOptions?: (options: { embeddings: boolean }) => Promise<void>;
-}
-
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: Date;
-  ragContext?: string[];
-}
-
-interface Conversation {
-  id: string;
-  title: string;
-  messages: Message[];
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-interface CachedModel {
-  url: string;
-  size: number;
-  name: string;
-}
-
-interface EmbeddingDocument {
-  id: string;
-  text: string;
-  embedding: number[];
-  metadata?: {
-    source?: string;
-    timestamp: number;
-  };
-}
 
 export default function WllamaUI() {
   const {
@@ -102,6 +57,7 @@ export default function WllamaUI() {
   const [ragTopK, setRagTopK] = useState(3);
   const [knowledgeBaseCount, setKnowledgeBaseCount] = useState(0);
   const [embeddingModelUrl, setEmbeddingModelUrl] = useState('https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf');
+  const [modelLoaded, setModelLoaded] = useState(false);
 
   const wllamaRef = useRef<Wllama | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -138,6 +94,25 @@ export default function WllamaUI() {
     }
     loadCachedModels();
     initEmbeddingDB();
+
+    const existingModel = ChatModelManager.getModel();
+    if (existingModel) {
+      wllamaRef.current = existingModel;
+      setModelLoaded(true);
+      setStatus('Chat model restored from session');
+    }
+
+    const handleModelChange = () => {
+      const model = ChatModelManager.getModel();
+      wllamaRef.current = model;
+      setModelLoaded(model !== null);
+    };
+
+    window.addEventListener('chat-model-changed', handleModelChange);
+    
+    return () => {
+      window.removeEventListener('chat-model-changed', handleModelChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -431,6 +406,9 @@ export default function WllamaUI() {
 
       await wllamaRef.current.loadModelFromUrl(fullUrl, config);
 
+      ChatModelManager.setModel(wllamaRef.current);
+      setModelLoaded(true);
+
       const took = Date.now() - start;
       setStatus(`Chat model loaded successfully! (${took} ms)`);
       setLoadProgress(100);
@@ -510,6 +488,9 @@ export default function WllamaUI() {
       };
 
       await wllamaRef.current.loadModel(files, config);
+
+      ChatModelManager.setModel(wllamaRef.current);
+      setModelLoaded(true);
 
       const took = Date.now() - start;
       setStatus(`Split model loaded successfully! (${took} ms)`);
@@ -627,6 +608,9 @@ export default function WllamaUI() {
       const filesToLoad = Array.from(modelFile);
       await wllamaRef.current.loadModel(filesToLoad, config);
 
+      ChatModelManager.setModel(wllamaRef.current);
+      setModelLoaded(true);
+
       const took = Date.now() - start;
       setStatus(`Model loaded successfully! (${took} ms)`);
       setLoadProgress(100);
@@ -642,6 +626,13 @@ export default function WllamaUI() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const unloadChatModel = () => {
+    wllamaRef.current = null;
+    ChatModelManager.clear();
+    setModelLoaded(false);
+    setStatus('Chat model unloaded');
   };
 
   const deleteCachedModel = async (url: string) => {
@@ -715,7 +706,8 @@ export default function WllamaUI() {
   };
 
   const sendMessage = async () => {
-    if (!wllamaRef.current) {
+    const model = ChatModelManager.getModel();
+    if (!model) {
       setError('Please load a model first');
       return;
     }
@@ -793,7 +785,7 @@ export default function WllamaUI() {
       let fullContent = '';
       let displayContent = '';
 
-      await wllamaRef.current!.createCompletion(formattedPrompt, {
+      await model.createCompletion(formattedPrompt, {
         nPredict: 512,
         sampling: {
           temp: 0.7,
@@ -910,7 +902,7 @@ export default function WllamaUI() {
           <h2 className="text-white font-bold text-lg mb-3">Wllama RAG</h2>
           <button
             onClick={createNewConversation}
-            disabled={!wllamaRef.current}
+            disabled={!modelLoaded}
             className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
           >
             <Plus className="w-4 h-4" />
@@ -939,7 +931,7 @@ export default function WllamaUI() {
               </label>
               <button
                 onClick={handleRAGToggle}
-                disabled={!wllamaRef.current || (useRAG && knowledgeBaseCount === 0)}
+                disabled={!modelLoaded || (useRAG && knowledgeBaseCount === 0)}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                   useRAG ? 'bg-green-600' : 'bg-gray-600'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
@@ -977,7 +969,7 @@ export default function WllamaUI() {
                     setShowModelManager(true);
                     setModelManagerTab('embedding');
                   }}
-                  disabled={!wllamaRef.current}
+                  disabled={!modelLoaded}
                   className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 text-white text-xs font-semibold py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
                 >
                   <Download className="w-3 h-3" />
@@ -1038,7 +1030,6 @@ export default function WllamaUI() {
         </div>
       </div>
 
-      {/* Model Manager Modal */}
       {showModelManager && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 rounded-2xl border border-white/20 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
@@ -1108,11 +1099,11 @@ export default function WllamaUI() {
                     <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside">
                       <li>Generates responses to your messages</li>
                       <li>Supports multiple chat templates (Gemma, Qwen, Llama, ChatML)</li>
-                      <li>Recommended: gemma-2b-it-GGUF or qwen models</li>
+                      <li>Persists across page navigation</li>
                     </ul>
                   </div>
 
-                  {wllamaRef.current && (
+                  {modelLoaded && (
                     <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
                       <div className="flex items-center justify-between">
                         <div>
@@ -1123,10 +1114,7 @@ export default function WllamaUI() {
                           <p className="text-green-200 text-sm">Ready for conversations</p>
                         </div>
                         <button
-                          onClick={() => {
-                            wllamaRef.current = null;
-                            setStatus('Chat model unloaded');
-                          }}
+                          onClick={unloadChatModel}
                           className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm"
                         >
                           Unload
@@ -1497,7 +1485,7 @@ export default function WllamaUI() {
                             <span className="text-white font-medium">Type:</span> {embeddingModelCapabilities.model_type}
                           </div>
                           <div className="text-blue-200">
-                            <span className="text-white font-medium">Dimensions:</span>: {embeddingModelCapabilities.n_embd}D
+                            <span className="text-white font-medium">Dimensions:</span> {embeddingModelCapabilities.n_embd}D
                           </div>
                         </div>
                       )}
@@ -1650,7 +1638,7 @@ export default function WllamaUI() {
                 {useRAG && <Sparkles className="w-5 h-5 text-yellow-400" />}
               </h1>
               <p className="text-purple-200 text-sm">
-                {wllamaRef.current ? (
+                {modelLoaded ? (
                   useRAG ? `RAG Mode: ${knowledgeBaseCount} docs ready` : 'Model loaded - Ready to chat'
                 ) : 'Load a model to start'}
               </p>
@@ -1671,7 +1659,7 @@ export default function WllamaUI() {
         )}
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {messages.length === 0 && wllamaRef.current && (
+          {messages.length === 0 && modelLoaded && (
             <div className="text-center text-purple-300 py-12">
               <Bot className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <p className="text-lg">Start a conversation!</p>
@@ -1687,7 +1675,7 @@ export default function WllamaUI() {
             </div>
           )}
 
-          {!wllamaRef.current && (
+          {!modelLoaded && (
             <div className="text-center text-purple-300 py-12">
               <HardDrive className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <p className="text-lg">No model loaded</p>
@@ -1773,14 +1761,14 @@ export default function WllamaUI() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyPress}
-                placeholder={wllamaRef.current ? "Type your message..." : "Load a model first..."}
-                disabled={!wllamaRef.current || isGenerating}
+                placeholder={modelLoaded ? "Type your message..." : "Load a model first..."}
+                disabled={!modelLoaded || isGenerating}
                 className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 min-h-[60px] max-h-[200px] focus:outline-none focus:ring-2 focus:ring-purple-500 resize-none disabled:opacity-50"
                 rows={2}
               />
               <button
                 onClick={sendMessage}
-                disabled={!wllamaRef.current || isGenerating || !input.trim()}
+                disabled={!modelLoaded || isGenerating || !input.trim()}
                 className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:from-gray-600 disabled:to-gray-600 disabled:cursor-not-allowed text-white font-bold p-4 rounded-lg transition-all flex items-center justify-center shadow-lg"
               >
                 <Send className="w-5 h-5" />
