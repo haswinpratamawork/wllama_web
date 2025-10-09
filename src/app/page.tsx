@@ -52,6 +52,9 @@ export default function WllamaUI() {
   const [loadMethod, setLoadMethod] = useState<'url' | 'file' | 'split'>('url');
   const [modelFile, setModelFile] = useState<FileList | null>(null);
   const [embeddingModelFiles, setEmbeddingModelFiles] = useState<File[]>([]);
+  const [embeddingSplitFiles, setEmbeddingSplitFiles] = useState<File[]>([]);
+  const [embeddingSplitUrls, setEmbeddingSplitUrls] = useState<string[]>(['']);
+  const [embeddingSplitLoadMethod, setEmbeddingSplitLoadMethod] = useState<'local' | 'url'>('local');
   const [splitFiles, setSplitFiles] = useState<File[]>([]);
   const [splitLoadMethod, setSplitLoadMethod] = useState<'local' | 'url'>('local');
   const [splitUrls, setSplitUrls] = useState<string[]>(['']);
@@ -68,6 +71,7 @@ export default function WllamaUI() {
   const wllamaRef = useRef<Wllama | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const embeddingFileInputRef = useRef<HTMLInputElement>(null);
+  const embeddingSplitFileInputRef = useRef<HTMLInputElement>(null);
   const splitFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -385,6 +389,96 @@ export default function WllamaUI() {
     }
 
     setEmbeddingModelFiles(sortedFiles);
+  };
+
+  const handleEmbeddingSplitFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) {
+      setEmbeddingSplitFiles([]);
+      return;
+    }
+
+    const sortedFiles = Array.from(files)
+      .filter(file => file.name.toLowerCase().endsWith('.gguf'))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    if (sortedFiles.length === 0) {
+      setError('Please select valid .gguf split files');
+      setEmbeddingSplitFiles([]);
+      if (embeddingSplitFileInputRef.current) {
+        embeddingSplitFileInputRef.current.value = '';
+      }
+      return;
+    }
+
+    setEmbeddingSplitFiles(sortedFiles);
+    setError('');
+  };
+
+  const addEmbeddingSplitUrl = () => {
+    setEmbeddingSplitUrls(prev => [...prev, '']);
+  };
+
+  const updateEmbeddingSplitUrl = (index: number, value: string) => {
+    setEmbeddingSplitUrls(prev => {
+      const next = [...prev];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const removeEmbeddingSplitUrl = (index: number) => {
+    setEmbeddingSplitUrls(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const clearEmbeddingSplitInputs = () => {
+    setEmbeddingSplitFiles([]);
+    setEmbeddingSplitUrls(['']);
+    if (embeddingSplitFileInputRef.current) {
+      embeddingSplitFileInputRef.current.value = '';
+    }
+  };
+
+  const loadEmbeddingSplitFromFiles = async () => {
+    if (embeddingSplitFiles.length === 0) {
+      setError('Please select split files first');
+      return;
+    }
+
+    await loadEmbeddingModelFromFiles(embeddingSplitFiles);
+    clearEmbeddingSplitInputs();
+  };
+
+  const loadEmbeddingSplitFromUrls = async () => {
+    const urls = embeddingSplitUrls.map(u => u.trim()).filter(Boolean);
+    if (urls.length === 0) {
+      setError('Please enter at least one split URL');
+      return;
+    }
+
+    try {
+      setStatus('Downloading embedding splits...');
+      const files: File[] = [];
+      for (let i = 0; i < urls.length; i++) {
+        const url = urls[i];
+        setStatus(`Downloading embedding split ${i + 1}/${urls.length}...`);
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch ${url} (${response.status} ${response.statusText})`);
+        }
+        const blob = await response.blob();
+        const filename = url.split('/').pop() || `split-${i + 1}.gguf`;
+        files.push(new File([blob], filename, { type: blob.type || 'application/octet-stream' }));
+      }
+      setStatus('Loading embedding splits...');
+      await loadEmbeddingModelFromFiles(files);
+      setStatus('');
+      clearEmbeddingSplitInputs();
+    } catch (err: any) {
+      setStatus('');
+      setError('Failed to load embedding splits from URLs: ' + (err?.message || String(err)));
+      console.error(err);
+    }
   };
 
   const loadModelFromUrl = async (url: string) => {
@@ -1674,6 +1768,177 @@ export default function WllamaUI() {
                           {embeddingModelFiles[0].name}
                           {embeddingModelFiles.length > 1 && ` (+${embeddingModelFiles.length - 1} more)`}
                         </p>
+                      )}
+                    </div>
+
+                    <div className="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <FileStack className="w-4 h-4 text-purple-300" />
+                        <p className="text-white font-semibold">Load Split GGUF</p>
+                      </div>
+                      <p className="text-blue-200 text-xs">
+                        Provide every shard either from local files or direct URLs, then load them together.
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEmbeddingSplitLoadMethod('local')}
+                          className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                            embeddingSplitLoadMethod === 'local'
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          }`}
+                          disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                        >
+                          <Upload className="w-4 h-4" />
+                          Local Files
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEmbeddingSplitLoadMethod('url')}
+                          className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
+                            embeddingSplitLoadMethod === 'url'
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          }`}
+                          disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                        >
+                          <Globe className="w-4 h-4" />
+                          From URLs
+                        </button>
+                      </div>
+
+                      {embeddingSplitLoadMethod === 'local' && (
+                        <div className="space-y-3">
+                          <input
+                            ref={embeddingSplitFileInputRef}
+                            type="file"
+                            accept=".gguf"
+                            multiple
+                            className="hidden"
+                            onChange={handleEmbeddingSplitFileSelect}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => embeddingSplitFileInputRef.current?.click()}
+                            className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                          >
+                            <Upload className="w-4 h-4" />
+                            Choose Split Files
+                          </button>
+                          {embeddingSplitFiles.length > 0 && (
+                            <p className="text-blue-200 text-xs">
+                              {embeddingSplitFiles[0].name}
+                              {embeddingSplitFiles.length > 1 && ` (+${embeddingSplitFiles.length - 1} more)`}
+                            </p>
+                          )}
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={loadEmbeddingSplitFromFiles}
+                              disabled={
+                                loadingEmbeddingModel ||
+                                embeddingModelDownloading ||
+                                embeddingSplitFiles.length === 0
+                              }
+                              className="flex-1 min-w-[160px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            >
+                              {loadingEmbeddingModel ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  Loading...
+                                </>
+                              ) : (
+                                <>
+                                  <Play className="w-4 h-4" />
+                                  Load Splits
+                                </>
+                              )}
+                            </button>
+                            {embeddingSplitFiles.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={clearEmbeddingSplitInputs}
+                                className="px-4 py-2 rounded-lg border border-white/20 text-white/80 hover:text-white hover:border-white/40 transition-colors text-sm"
+                                disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {embeddingSplitLoadMethod === 'url' && (
+                        <div className="space-y-3">
+                          <div className="space-y-2">
+                            {embeddingSplitUrls.map((url, index) => (
+                              <div key={index} className="flex gap-2">
+                                <input
+                                  type="text"
+                                  value={url}
+                                  onChange={(e) => updateEmbeddingSplitUrl(index, e.target.value)}
+                                  placeholder={`https://...split-${index + 1}.gguf`}
+                                  className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                  disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                                />
+                                {embeddingSplitUrls.length > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeEmbeddingSplitUrl(index)}
+                                    className="px-3 py-2 rounded-lg border border-white/20 text-white/80 hover:text-white hover:border-white/40 transition-colors text-xs"
+                                    disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                                  >
+                                    Remove
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={addEmbeddingSplitUrl}
+                            className="w-full bg-white/10 hover:bg-white/20 text-purple-200 font-semibold py-2 px-4 rounded-lg transition-colors"
+                            disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                          >
+                            Add Another URL
+                          </button>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={loadEmbeddingSplitFromUrls}
+                              disabled={
+                                loadingEmbeddingModel ||
+                                embeddingModelDownloading ||
+                                embeddingSplitUrls.every((url) => url.trim() === '')
+                              }
+                              className="flex-1 min-w-[160px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            >
+                              {loadingEmbeddingModel ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  Loading...
+                                </>
+                              ) : (
+                                <>
+                                  <Play className="w-4 h-4" />
+                                  Download & Load
+                                </>
+                              )}
+                            </button>
+                            {(embeddingSplitUrls.length > 1 || embeddingSplitUrls[0].trim()) && (
+                              <button
+                                type="button"
+                                onClick={clearEmbeddingSplitInputs}
+                                className="px-4 py-2 rounded-lg border border-white/20 text-white/80 hover:text-white hover:border-white/40 transition-colors text-sm"
+                                disabled={loadingEmbeddingModel || embeddingModelDownloading}
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
 
