@@ -28,6 +28,22 @@ interface UseEmbeddingModelReturn {
   unloadEmbeddingModel: () => void;
 }
 
+type EmbeddingSourceType = 'remote' | 'local';
+
+interface EmbeddingGlobalState {
+  instance: Wllama;
+  sourceType: EmbeddingSourceType;
+  identifier: string | null;
+  modelName: string;
+  capabilities: any;
+}
+
+declare global {
+  interface Window {
+    __wllamaEmbeddingState?: EmbeddingGlobalState;
+  }
+}
+
 const CONFIG_PATHS = {
   'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
   'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
@@ -57,11 +73,13 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       identifier = null,
       modelName,
       silent = false,
+      persistState = true,
     }: {
-      sourceType: 'remote' | 'local';
+      sourceType: EmbeddingSourceType;
       identifier?: string | null;
       modelName: string;
       silent?: boolean;
+      persistState?: boolean;
     }
   ) => {
     const metadata = wllama.getModelMetadata?.() ?? {};
@@ -83,14 +101,26 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     setModelCapabilities(capabilities);
     setLoadProgress(100);
 
-    EmbeddingModelManager.saveModelState({
-      isLoaded: true,
-      sourceType,
-      modelUrl: sourceType === 'remote' ? (identifier ?? null) : null,
-      modelName,
-      capabilities,
-      loadedAt: Date.now(),
-    });
+    if (typeof window !== 'undefined') {
+      window.__wllamaEmbeddingState = {
+        instance: wllama,
+        sourceType,
+        identifier: sourceType === 'remote' ? (identifier ?? null) : null,
+        modelName,
+        capabilities,
+      };
+    }
+
+    if (persistState) {
+      EmbeddingModelManager.saveModelState({
+        isLoaded: true,
+        sourceType,
+        modelUrl: sourceType === 'remote' ? (identifier ?? null) : null,
+        modelName,
+        capabilities,
+        loadedAt: Date.now(),
+      });
+    }
 
     if (!silent) {
       const contextTokens = contextInfo.n_ctx ?? capabilities.n_ctx_train ?? '?';
@@ -163,6 +193,7 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
         identifier: url,
         modelName,
         silent,
+        persistState: true,
       });
     } catch (err: any) {
       const errorMsg = err?.message || String(err);
@@ -275,6 +306,7 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
         identifier: null,
         modelName,
         silent: false,
+        persistState: true,
       });
     } catch (err: any) {
       const errorMsg = err?.message || String(err);
@@ -305,15 +337,36 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     setModelCapabilities(null);
     EmbeddingModelManager.clearModelState();
     setStatus('Embedding model unloaded');
+    if (typeof window !== 'undefined') {
+      delete window.__wllamaEmbeddingState;
+    }
   }, []);
 
   // Initialize only once
   useEffect(() => {
     let mounted = true;
 
+    const globalState =
+      typeof window !== 'undefined' ? window.__wllamaEmbeddingState : undefined;
+    const hydratedFromGlobal = !!globalState?.instance;
+
+    if (hydratedFromGlobal) {
+      finalizeLoad(globalState.instance, {
+        sourceType: globalState.sourceType,
+        identifier: globalState.identifier,
+        modelName: globalState.modelName,
+        silent: true,
+        persistState: false,
+      });
+    }
+
     const init = async () => {
       // Only load if not already loaded
       if (wllamaRef.current || isLoadingRef.current) {
+        return;
+      }
+
+      if (hydratedFromGlobal) {
         return;
       }
 
@@ -332,6 +385,28 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       
       const customEvent = e as CustomEvent;
       const state = customEvent.detail;
+      const latestGlobal =
+        typeof window !== 'undefined' ? window.__wllamaEmbeddingState : undefined;
+
+      if (latestGlobal?.instance) {
+        const globalIdentifier =
+          latestGlobal.sourceType === 'remote' ? latestGlobal.identifier : null;
+        const shouldAdopt =
+          !wllamaRef.current ||
+          (latestGlobal.sourceType === 'remote' &&
+            globalIdentifier !== currentUrlRef.current);
+
+        if (shouldAdopt) {
+          finalizeLoad(latestGlobal.instance, {
+            sourceType: latestGlobal.sourceType,
+            identifier: latestGlobal.identifier,
+            modelName: latestGlobal.modelName,
+            silent: true,
+            persistState: false,
+          });
+          return;
+        }
+      }
       
       // Only load if different URL and not already loading
       if (state?.isLoaded && state.sourceType === 'remote' && state.modelUrl && 
@@ -360,7 +435,7 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       window.removeEventListener('embedding-model-loaded', handleModelLoaded);
       window.removeEventListener('embedding-model-unloaded', handleModelUnloaded);
     };
-  }, [loadEmbeddingModel]);
+  }, [loadEmbeddingModel, finalizeLoad]);
 
   return {
     embeddingModel,
