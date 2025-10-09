@@ -1,6 +1,9 @@
+type EmbeddingModelSource = 'remote' | 'local';
+
 interface EmbeddingModelState {
   isLoaded: boolean;
-  modelUrl: string;
+  sourceType: EmbeddingModelSource;
+  modelUrl: string | null;
   modelName: string;
   capabilities: {
     n_ctx_train: number;
@@ -23,7 +26,15 @@ export class EmbeddingModelManager {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return null;
     try {
-      return JSON.parse(stored);
+      const parsed = JSON.parse(stored);
+      return {
+        sourceType: parsed.sourceType ?? (parsed.modelUrl ? 'remote' : 'local'),
+        modelUrl: parsed.modelUrl ?? null,
+        isLoaded: parsed.isLoaded ?? false,
+        modelName: parsed.modelName ?? 'unknown',
+        capabilities: parsed.capabilities ?? null,
+        loadedAt: parsed.loadedAt ?? Date.now(),
+      } as EmbeddingModelState;
     } catch {
       return null;
     }

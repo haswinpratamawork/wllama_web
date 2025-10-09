@@ -20,8 +20,14 @@ interface UseEmbeddingModelReturn {
   status: string;
   modelCapabilities: any;
   loadEmbeddingModel: (url: string) => Promise<void>;
+  loadEmbeddingModelFromFiles: (files: FileList | File[]) => Promise<void>;
   unloadEmbeddingModel: () => void;
 }
+
+const CONFIG_PATHS = {
+  'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
+  'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
+};
 
 export function useEmbeddingModel(): UseEmbeddingModelReturn {
   const [embeddingModel, setEmbeddingModel] = useState<Wllama | null>(null);
@@ -36,6 +42,57 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
   const modelManagerRef = useRef<any>(null);
   const currentUrlRef = useRef<string | null>(null);
   const isLoadingRef = useRef<boolean>(false);
+
+  const finalizeLoad = useCallback((
+    wllama: Wllama,
+    {
+      sourceType,
+      identifier = null,
+      modelName,
+      silent = false,
+    }: {
+      sourceType: 'remote' | 'local';
+      identifier?: string | null;
+      modelName: string;
+      silent?: boolean;
+    }
+  ) => {
+    const metadata = wllama.getModelMetadata?.() ?? {};
+    const contextInfo = wllama.getLoadedContextInfo?.() ?? {};
+    const hparams = (metadata as any).hparams ?? {};
+    const meta = (metadata as any).meta ?? {};
+
+    const capabilities = {
+      n_ctx_train: hparams.nCtxTrain ?? contextInfo.n_ctx ?? 0,
+      n_embd: hparams.nEmbd ?? 0,
+      n_vocab: hparams.nVocab ?? 0,
+      model_type: meta['general.architecture'] || 'unknown',
+    };
+
+    currentUrlRef.current = sourceType === 'remote' ? (identifier ?? null) : null;
+    wllamaRef.current = wllama;
+    setEmbeddingModel(wllama);
+    setIsLoaded(true);
+    setModelCapabilities(capabilities);
+    setLoadProgress(100);
+
+    EmbeddingModelManager.saveModelState({
+      isLoaded: true,
+      sourceType,
+      modelUrl: sourceType === 'remote' ? (identifier ?? null) : null,
+      modelName,
+      capabilities,
+      loadedAt: Date.now(),
+    });
+
+    if (!silent) {
+      const contextTokens = contextInfo.n_ctx ?? capabilities.n_ctx_train ?? '?';
+      setStatus(
+        `Embedding model loaded${sourceType === 'local' ? ' from files' : ''}: ${modelName} ` +
+        `(Context ${contextTokens} tokens, Embedding ${capabilities.n_embd}D)`
+      );
+    }
+  }, []);
 
   const loadEmbeddingModel = useCallback(async (url: string, silent: boolean = false) => {
     if (!url.trim()) {
@@ -64,12 +121,6 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     try {
       const WllamaModule = await import('@wllama/wllama/esm/index.js');
       const { Wllama, ModelManager } = WllamaModule;
-
-      const CONFIG_PATHS = {
-        'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
-        'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
-      };
-
       const wllama = new Wllama(CONFIG_PATHS);
       
       if (!modelManagerRef.current) {
@@ -91,6 +142,7 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       if (!silent) setStatus('Opening model blobs...');
       const blobs = await model.open();
 
+      const modelName = url.split('/').pop() || 'model';
       if (!silent) setStatus('Loading embedding model into runtime...');
       
       await wllama.loadModel(blobs, {
@@ -99,41 +151,12 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
         pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
       });
 
-      if (!silent) setStatus('Reading model capabilities...');
-      const metadata = wllama.getModelMetadata();
-      const contextInfo = wllama.getLoadedContextInfo();
-      
-      const capabilities = {
-        n_ctx_train: metadata.hparams.nCtxTrain,
-        n_embd: metadata.hparams.nEmbd,
-        n_vocab: metadata.hparams.nVocab,
-        model_type: metadata.meta['general.architecture'] || 'unknown',
-      };
-
-      setModelCapabilities(capabilities);
-      
-      const modelName = url.split('/').pop() || 'model';
-      
-      EmbeddingModelManager.saveModelState({
-        isLoaded: true,
-        modelUrl: url,
+      finalizeLoad(wllama, {
+        sourceType: 'remote',
+        identifier: url,
         modelName,
-        capabilities,
-        loadedAt: Date.now(),
+        silent,
       });
-
-      currentUrlRef.current = url;
-      wllamaRef.current = wllama;
-      setEmbeddingModel(wllama);
-      setIsLoaded(true);
-      setLoadProgress(100);
-      
-      if (!silent) {
-        setStatus(
-          `✓ Embedding model loaded! ${modelName} - Context: ${contextInfo.n_ctx} tokens, ` +
-          `Embedding: ${metadata.hparams.nEmbd}D`
-        );
-      }
     } catch (err: any) {
       const errorMsg = err?.message || String(err);
       
@@ -153,7 +176,59 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       setIsLoading(false);
       isLoadingRef.current = false;
     }
-  }, []);
+  }, [finalizeLoad]);
+
+  const loadEmbeddingModelFromFiles = useCallback(async (files: FileList | File[]) => {
+    const fileArray = Array.from(files as any).filter(Boolean) as File[];
+    if (fileArray.length === 0) {
+      setError('Please select embedding model file(s) first');
+      return;
+    }
+
+    if (isLoadingRef.current) {
+      console.log('Already loading a model, skipping...');
+      return;
+    }
+
+    isLoadingRef.current = true;
+    setIsLoading(true);
+    setError('');
+    setLoadProgress(0);
+    setStatus('Initializing embedding model from files...');
+
+    try {
+      const WllamaModule = await import('@wllama/wllama/esm/index.js');
+      const { Wllama } = WllamaModule;
+      const wllama = new Wllama(CONFIG_PATHS);
+
+      setStatus('Loading embedding model from local files...');
+
+      await wllama.loadModel(fileArray, {
+        embeddings: true,
+        n_ctx: 2048,
+        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
+      });
+
+      const modelName = fileArray.length === 1
+        ? fileArray[0].name
+        : `${fileArray[0].name} (+${fileArray.length - 1} parts)`;
+
+      finalizeLoad(wllama, {
+        sourceType: 'local',
+        identifier: null,
+        modelName,
+        silent: false,
+      });
+    } catch (err: any) {
+      const errorMsg = err?.message || String(err);
+      setError('Failed to load embedding model from files: ' + errorMsg);
+      setStatus('');
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+      isLoadingRef.current = false;
+    }
+  }, [finalizeLoad]);
 
   const unloadEmbeddingModel = useCallback(() => {
     wllamaRef.current = null;
@@ -176,8 +251,10 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       }
 
       const state = EmbeddingModelManager.getModelState();
-      if (state?.isLoaded && state.modelUrl && mounted) {
+      if (state?.isLoaded && state.sourceType === 'remote' && state.modelUrl && mounted) {
         await loadEmbeddingModel(state.modelUrl, true);
+      } else if (state?.isLoaded && state.sourceType === 'local' && mounted) {
+        setStatus('Embedding model was loaded from local files in a previous session. Reload from files to use again.');
       }
     };
 
@@ -190,10 +267,12 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       const state = customEvent.detail;
       
       // Only load if different URL and not already loading
-      if (state?.isLoaded && state.modelUrl && 
+      if (state?.isLoaded && state.sourceType === 'remote' && state.modelUrl && 
           state.modelUrl !== currentUrlRef.current && 
           !isLoadingRef.current) {
         loadEmbeddingModel(state.modelUrl, true);
+      } else if (state?.isLoaded && state.sourceType === 'local') {
+        setStatus('Embedding model loaded from local files in another tab. Reload here if needed.');
       }
     };
 
@@ -225,6 +304,7 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     status,
     modelCapabilities,
     loadEmbeddingModel,
+    loadEmbeddingModelFromFiles,
     unloadEmbeddingModel,
   };
 }

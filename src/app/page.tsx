@@ -25,6 +25,7 @@ export default function WllamaUI() {
     status: embeddingModelStatus,
     modelCapabilities: embeddingModelCapabilities,
     loadEmbeddingModel,
+    loadEmbeddingModelFromFiles,
     unloadEmbeddingModel,
   } = useEmbeddingModel();
 
@@ -46,6 +47,7 @@ export default function WllamaUI() {
   const [cachedModels, setCachedModels] = useState<CachedModel[]>([]);
   const [loadMethod, setLoadMethod] = useState<'url' | 'file' | 'split'>('url');
   const [modelFile, setModelFile] = useState<FileList | null>(null);
+  const [embeddingModelFiles, setEmbeddingModelFiles] = useState<File[]>([]);
   const [splitFiles, setSplitFiles] = useState<File[]>([]);
   const [splitLoadMethod, setSplitLoadMethod] = useState<'local' | 'url'>('local');
   const [splitUrls, setSplitUrls] = useState<string[]>(['']);
@@ -61,6 +63,7 @@ export default function WllamaUI() {
 
   const wllamaRef = useRef<Wllama | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const embeddingFileInputRef = useRef<HTMLInputElement>(null);
   const splitFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -356,6 +359,28 @@ export default function WllamaUI() {
         setModelFile(null);
       }
     }
+  };
+
+  const handleEmbeddingFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) {
+      setEmbeddingModelFiles([]);
+      return;
+    }
+
+    const sortedFiles = Array.from(files)
+      .filter(file => file.name.toLowerCase().endsWith('.gguf'))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    if (sortedFiles.length === 0) {
+      if (embeddingFileInputRef.current) {
+        embeddingFileInputRef.current.value = '';
+      }
+      setEmbeddingModelFiles([]);
+      return;
+    }
+
+    setEmbeddingModelFiles(sortedFiles);
   };
 
   const loadModelFromUrl = async (url: string) => {
@@ -1526,6 +1551,86 @@ export default function WllamaUI() {
                         </>
                       )}
                     </button>
+
+                    <div className="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-white font-semibold">Upload Local GGUF</p>
+                          <p className="text-blue-200 text-xs">Load an embedding model directly from your device</p>
+                        </div>
+                        {embeddingModelFiles.length > 0 && (
+                          <span className="text-green-300 text-xs">
+                            {embeddingModelFiles.length} file(s)
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        ref={embeddingFileInputRef}
+                        type="file"
+                        accept=".gguf"
+                        multiple
+                        className="hidden"
+                        onChange={handleEmbeddingFileSelect}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => embeddingFileInputRef.current?.click()}
+                          className="flex-1 min-w-[140px] bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                        >
+                          <Upload className="w-4 h-4" />
+                          Choose Files
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (embeddingModelFiles.length === 0) {
+                              embeddingFileInputRef.current?.click();
+                              return;
+                            }
+                            await loadEmbeddingModelFromFiles(embeddingModelFiles);
+                            setEmbeddingModelFiles([]);
+                            if (embeddingFileInputRef.current) {
+                              embeddingFileInputRef.current.value = '';
+                            }
+                          }}
+                          disabled={loadingEmbeddingModel || embeddingModelLoaded}
+                          className="flex-1 min-w-[170px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                        >
+                          {loadingEmbeddingModel ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Loading...
+                            </>
+                          ) : (
+                            <>
+                              <Play className="w-4 h-4" />
+                              Load From Files
+                            </>
+                          )}
+                        </button>
+                        {embeddingModelFiles.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmbeddingModelFiles([]);
+                              if (embeddingFileInputRef.current) {
+                                embeddingFileInputRef.current.value = '';
+                              }
+                            }}
+                            className="px-4 py-2 rounded-lg border border-white/20 text-white/80 hover:text-white hover:border-white/40 transition-colors text-sm"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      {embeddingModelFiles.length > 0 && (
+                        <p className="text-blue-200 text-xs">
+                          {embeddingModelFiles[0].name}
+                          {embeddingModelFiles.length > 1 && ` (+${embeddingModelFiles.length - 1} more)`}
+                        </p>
+                      )}
+                    </div>
 
                     {embeddingModelStatus && (
                       <p className="text-blue-300 text-sm">{embeddingModelStatus}</p>
