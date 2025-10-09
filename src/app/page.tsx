@@ -26,6 +26,10 @@ export default function WllamaUI() {
     modelCapabilities: embeddingModelCapabilities,
     loadEmbeddingModel,
     loadEmbeddingModelFromFiles,
+    downloadEmbeddingModelToCache,
+    isDownloading: embeddingModelDownloading,
+    downloadProgress: embeddingDownloadProgress,
+    downloadStatus: embeddingDownloadStatus,
     unloadEmbeddingModel,
   } = useEmbeddingModel();
 
@@ -1479,7 +1483,7 @@ export default function WllamaUI() {
                     <ul className="text-blue-200 text-xs space-y-1 list-disc list-inside">
                       <li>Required for semantic search in knowledge base</li>
                       <li>Shared across chat and embedding pages</li>
-                      <li>Recommended: embeddinggemma-300M-Q8_0.gguf (~300MB)</li>
+                      <li>Recommended: GGUF embeddings under ~1GB (e.g., nomic-embed-text-v1.5-Q5)</li>
                     </ul>
                   </div>
 
@@ -1531,7 +1535,7 @@ export default function WllamaUI() {
                       onClick={async () => {
                         await loadEmbeddingModel(embeddingModelUrl);
                       }}
-                      disabled={loadingEmbeddingModel || embeddingModelLoaded || !embeddingModelUrl}
+                      disabled={loadingEmbeddingModel || embeddingModelLoaded || !embeddingModelUrl || embeddingModelDownloading}
                       className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                     >
                       {loadingEmbeddingModel ? (
@@ -1551,6 +1555,47 @@ export default function WllamaUI() {
                         </>
                       )}
                     </button>
+
+                    <div className="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-white font-semibold">Cache With Model Manager</p>
+                          <p className="text-blue-200 text-xs">
+                            Download once and reuse from the browser cache (ideal for multi-shard GGUFs)
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await downloadEmbeddingModelToCache(embeddingModelUrl);
+                          await loadCachedModels();
+                        }}
+                        disabled={
+                          !embeddingModelUrl ||
+                          loadingEmbeddingModel ||
+                          embeddingModelDownloading
+                        }
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                      >
+                        {embeddingModelDownloading ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Caching... {embeddingDownloadProgress}%
+                          </>
+                        ) : (
+                          <>
+                            <HardDrive className="w-4 h-4" />
+                            Download to Cache
+                          </>
+                        )}
+                      </button>
+                      {embeddingDownloadStatus && (
+                        <p className="text-blue-200 text-xs whitespace-pre-wrap">
+                          {embeddingDownloadStatus}
+                        </p>
+                      )}
+                    </div>
 
                     <div className="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">
                       <div className="flex items-center justify-between">
@@ -1594,7 +1639,7 @@ export default function WllamaUI() {
                               embeddingFileInputRef.current.value = '';
                             }
                           }}
-                          disabled={loadingEmbeddingModel || embeddingModelLoaded}
+                          disabled={loadingEmbeddingModel || embeddingModelLoaded || embeddingModelDownloading}
                           className="flex-1 min-w-[170px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                         >
                           {loadingEmbeddingModel ? (

@@ -21,6 +21,10 @@ interface UseEmbeddingModelReturn {
   modelCapabilities: any;
   loadEmbeddingModel: (url: string) => Promise<void>;
   loadEmbeddingModelFromFiles: (files: FileList | File[]) => Promise<void>;
+  downloadEmbeddingModelToCache: (url: string) => Promise<void>;
+  isDownloading: boolean;
+  downloadProgress: number;
+  downloadStatus: string;
   unloadEmbeddingModel: () => void;
 }
 
@@ -36,6 +40,9 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
   const [loadProgress, setLoadProgress] = useState(0);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStatus, setDownloadStatus] = useState('');
   const [modelCapabilities, setModelCapabilities] = useState<any>(null);
   
   const wllamaRef = useRef<Wllama | null>(null);
@@ -162,10 +169,14 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       
       if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
         setError(
-          '⚠️ Model too large for browser memory. Try:\n' +
+          'Warning: model is too large for browser memory. Try:\n' +
           '1. Close other tabs to free memory\n' +
           '2. Use a smaller quantization (Q4_K_M, Q3_K_M)\n' +
           '3. Restart your browser'
+        );
+      } else if (errorMsg.includes('unknown model architecture')) {
+        setError(
+          'Warning: unsupported GGUF architecture. Update wllama to a newer build or pick a model whose `general.architecture` is supported (for example, try a Nomic or BGE embedding model).'
         );
       } else {
         setError('Failed to load embedding model: ' + errorMsg);
@@ -177,6 +188,52 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       isLoadingRef.current = false;
     }
   }, [finalizeLoad]);
+
+  const downloadEmbeddingModelToCache = useCallback(async (url: string) => {
+    if (!url.trim()) {
+      setDownloadStatus('Please enter a model URL');
+      return;
+    }
+
+    if (isDownloading) {
+      setDownloadStatus('Already downloading a model...');
+      return;
+    }
+
+    try {
+      setIsDownloading(true);
+      setDownloadProgress(0);
+      setDownloadStatus('Initializing download...');
+
+      const WllamaModule = await import('@wllama/wllama/esm/index.js');
+      const { ModelManager } = WllamaModule;
+
+      if (!modelManagerRef.current) {
+        modelManagerRef.current = new ModelManager();
+      }
+
+      await modelManagerRef.current.downloadModel(url, {
+        progressCallback: ({ loaded, total }: { loaded: number; total: number }) => {
+          if (!total) return;
+          const percent = Math.round((loaded / total) * 100);
+          setDownloadProgress(percent);
+          setDownloadStatus(
+            `Downloading and caching... ${percent}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)`
+          );
+        },
+      });
+
+      setDownloadStatus('Model cached successfully. You can load it from the cache list.');
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      setDownloadStatus('Failed to cache model: ' + message);
+    } finally {
+      setIsDownloading(false);
+      setTimeout(() => {
+        setDownloadProgress(0);
+      }, 3000);
+    }
+  }, [isDownloading]);
 
   const loadEmbeddingModelFromFiles = useCallback(async (files: FileList | File[]) => {
     const fileArray = Array.from(files as any).filter(Boolean) as File[];
@@ -221,7 +278,17 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
       });
     } catch (err: any) {
       const errorMsg = err?.message || String(err);
-      setError('Failed to load embedding model from files: ' + errorMsg);
+      if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
+        setError(
+          'Warning: model file is too large for the browser to map into memory. Try using lower quantization shards or split the GGUF into smaller parts.'
+        );
+      } else if (errorMsg.includes('unknown model architecture')) {
+        setError(
+          'Warning: unsupported GGUF architecture. Make sure the file targets a llama.cpp build with this architecture or choose a compatible embedding model.'
+        );
+      } else {
+        setError('Failed to load embedding model from files: ' + errorMsg);
+      }
       setStatus('');
       console.error(err);
     } finally {
@@ -305,6 +372,10 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     modelCapabilities,
     loadEmbeddingModel,
     loadEmbeddingModelFromFiles,
+    downloadEmbeddingModelToCache,
+    isDownloading,
+    downloadProgress,
+    downloadStatus,
     unloadEmbeddingModel,
   };
 }
