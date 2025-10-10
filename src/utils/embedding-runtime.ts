@@ -1,5 +1,6 @@
 import { ModelManager, Wllama } from '@wllama/wllama';
 import { DebugLogger, WllamaStorage } from './utils';
+import { withPerfTimer } from './perf-monitor';
 import { storeLocalModelFiles } from './local-model-cache';
 
 export type EmbeddingModelSource = 'remote' | 'local';
@@ -209,17 +210,24 @@ export const resetEmbeddingRuntime = async () => {
 export const createEmbeddingVector = async (
   text: string,
   options: { skipBos?: boolean; skipEos?: boolean } = {}
-): Promise<Float32Array> => {
-  if (!currentModel) {
-    throw new Error('Embedding model belum dimuat');
-  }
-  const inst = await getEmbeddingRuntime();
-  const vec: number[] = await (inst as any).createEmbedding(text, {
-    skipBOS: options.skipBos ?? true,
-    skipEOS: options.skipEos ?? true,
-  });
-  return Float32Array.from(vec);
-};
+): Promise<Float32Array> =>
+  withPerfTimer(
+    'embedding:generate',
+    async () => {
+      if (!currentModel) {
+        throw new Error('Embedding model belum dimuat');
+      }
+      const inst = await getEmbeddingRuntime();
+      const vec: number[] = await (inst as any).createEmbedding(text, {
+        skipBOS: options.skipBos ?? true,
+        skipEOS: options.skipEos ?? true,
+      });
+      return Float32Array.from(vec);
+    },
+    () => ({
+      textLength: text.length,
+    })
+  );
 
 export const getSavedEmbeddingPreference = (): SavedEmbeddingModel | null => {
   return WllamaStorage.load<SavedEmbeddingModel | null>(

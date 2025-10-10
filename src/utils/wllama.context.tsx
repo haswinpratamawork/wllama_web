@@ -16,6 +16,7 @@ import {
   updateUserAddedModels,
 } from './displayed-model';
 import { storeLocalModelFiles } from './local-model-cache';
+import { withPerfTimer } from './perf-monitor';
 
 interface WllamaContextValue {
   // functions for managing models
@@ -274,21 +275,33 @@ export const WllamaProvider = ({ children }: any) => {
     if (isDownloading || !loadedModel || isLoadingModel) return;
     setGenerating(true);
     stopSignal = false;
-    const result = await wllamaInstance.createCompletion(input, {
-      nPredict: currParams.nPredict,
-      useCache: true,
-      sampling: {
-        temp: currParams.temperature,
-      },
-      // @ts-ignore unused variable
-      onNewToken(token, piece, currentText, optionals) {
-        callback(currentText);
-        if (stopSignal) optionals.abortSignal();
-      },
-    });
-    callback(result);
-    stopSignal = false;
-    setGenerating(false);
+    try {
+      await withPerfTimer(
+        'answer:generate',
+        async () => {
+          const result = await wllamaInstance.createCompletion(input, {
+            nPredict: currParams.nPredict,
+            useCache: true,
+            sampling: {
+              temp: currParams.temperature,
+            },
+            // @ts-ignore unused variable
+            onNewToken(token, piece, currentText, optionals) {
+              callback(currentText);
+              if (stopSignal) optionals.abortSignal();
+            },
+          });
+          callback(result);
+        },
+        () => ({
+          nPredict: currParams.nPredict,
+          temperature: currParams.temperature,
+        })
+      );
+    } finally {
+      stopSignal = false;
+      setGenerating(false);
+    }
   };
 
   const stopCompletion = () => {

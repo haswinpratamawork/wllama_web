@@ -10,6 +10,7 @@ import {
   faBug,
 } from '@fortawesome/free-solid-svg-icons';
 import { WLLAMA_VERSION } from '../config';
+import PerfMonitorPanel from './PerfMonitorPanel';
 
 export default function Sidebar({ children }: { children: any }) {
   const { currentConvId, navigateTo, currScreen, loadedModel } = useWllama();
@@ -30,7 +31,7 @@ export default function Sidebar({ children }: { children: any }) {
         ></label>
 
         <div className="h-screen lg:max-h-[calc(100vh-4rem)] flex flex-col text-base-content bg-base-200">
-          <div className="grow w-80 overflow-auto p-4">
+          <div className="grow w-80 overflow-auto p-4 flex flex-col gap-4">
             <ul className="menu gap-1 overflow-x-hidden">
               <li onClick={() => navigateTo(Screen.CHAT)}>
                 <a
@@ -70,6 +71,21 @@ export default function Sidebar({ children }: { children: any }) {
                 </li>
               ))}
             </ul>
+
+            <div className="mt-auto">
+              <div className="collapse collapse-arrow bg-base-300/40 border border-base-300 rounded-lg">
+                <input type="checkbox" className="min-h-0" />
+                <div className="collapse-title text-sm font-semibold text-base-content">
+                  Performance Monitor
+                </div>
+                <div className="collapse-content px-0 pb-0 pt-0">
+                  <PerfMonitorPanel
+                    hideHeader
+                    className="bg-transparent border-0 p-0"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="w-80 px-4 pt-0 pb-8">

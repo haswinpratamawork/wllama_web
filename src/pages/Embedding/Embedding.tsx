@@ -20,6 +20,12 @@ import {
   type KnowledgeImportRecord,
   type RagSearchHit,
 } from '../../utils/rag.context';
+import {
+  formatDuration as formatDurationMs,
+  getPerfLabel,
+  usePerfMonitor,
+  type PerfEvent,
+} from '../../utils/perf-monitor';
 
 const formatDate = (value: number) =>
   new Date(value).toLocaleString(undefined, {
@@ -42,6 +48,30 @@ export default function EmbeddingPage() {
   const [searchText, setSearchText] = useState('');
   const [searchResults, setSearchResults] = useState<RagSearchHit[]>([]);
   const [searching, setSearching] = useState(false);
+  const perfState = usePerfMonitor();
+
+  const summaryItems = useMemo(() => {
+    const keys = [
+      'embedding:generate',
+      'rag:search',
+      'hnsw:search',
+      'hnsw:rebuild',
+      'answer:generate',
+      'idb:getAllKnowledge',
+    ];
+    return keys
+      .map((key) => {
+        const event = perfState.latestByName[key];
+        if (!event) return null;
+        return { key, event };
+      })
+      .filter(Boolean) as Array<{ key: string; event: PerfEvent }>;
+  }, [perfState.latestByName]);
+
+  const recentEvents = useMemo(
+    () => [...perfState.events].reverse().slice(0, 10),
+    [perfState.events]
+  );
 
   const {
     ragEnabled,
@@ -332,6 +362,108 @@ export default function EmbeddingPage() {
           </div>
 
           <div className="p-6 md:p-8 border-t border-[oklch(0.25_0.04_260)] space-y-8">
+            <section className="space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <h2 className="text-xl font-semibold text-[oklch(0.95_0.02_260)]">
+                  Performance Monitor
+                </h2>
+                <div className="text-xs text-[oklch(0.7_0.02_260)]">
+                  Pantau durasi proses embedding, RAG, HNSW, dan IndexedDB.
+                </div>
+              </div>
+
+              {summaryItems.length ? (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {summaryItems.map(({ key, event }) => {
+                    const metaEntries = event.meta
+                      ? Object.entries(event.meta).map(([metaKey, metaValue]) => {
+                        if (metaValue === undefined || metaValue === null) {
+                          return `${metaKey}: -`;
+                        }
+                        if (typeof metaValue === 'object') {
+                          return `${metaKey}: ${JSON.stringify(metaValue)}`;
+                        }
+                        return `${metaKey}: ${metaValue}`;
+                      })
+                      : [];
+                    return (
+                      <div
+                        key={key}
+                        className="p-4 bg-[oklch(0.2_0.05_260)] border border-[oklch(0.25_0.04_260)] rounded-lg space-y-2"
+                      >
+                        <div className="text-xs uppercase tracking-wide text-[oklch(0.7_0.02_260)]">
+                          {getPerfLabel(key)}
+                        </div>
+                        <div className="text-2xl font-semibold text-[oklch(0.95_0.02_260)]">
+                          {formatDurationMs(event.durationMs)}
+                        </div>
+                        <div className="text-[0.7rem] text-[oklch(0.65_0.02_260)]">
+                          Update {formatDate(event.wallClock)}
+                        </div>
+                        {metaEntries.length > 0 && (
+                          <div className="text-[0.65rem] text-[oklch(0.7_0.02_260)] space-y-1">
+                            {metaEntries.map((entry) => (
+                              <div key={entry}>{entry}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-sm text-[oklch(0.7_0.02_260)] border border-dashed border-[oklch(0.25_0.04_260)] rounded-lg p-4">
+                  Belum ada data performa yang terekam. Lakukan operasi seperti menambah knowledge atau menjalankan RAG untuk mulai mengumpulkan data.
+                </div>
+              )}
+
+              {recentEvents.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-[oklch(0.9_0.02_260)]">
+                    Riwayat terbaru
+                  </div>
+                  <div className="overflow-auto border border-[oklch(0.25_0.04_260)] rounded-lg">
+                    <table className="table table-xs text-[0.7rem]">
+                      <thead>
+                        <tr className="bg-[oklch(0.2_0.05_260)] text-[oklch(0.75_0.02_260)]">
+                          <th>Waktu</th>
+                          <th>Event</th>
+                          <th>Durasi</th>
+                          <th>Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recentEvents.map((event) => {
+                          const metaEntries = event.meta
+                            ? Object.entries(event.meta)
+                              .map(
+                                ([metaKey, metaValue]) =>
+                                  `${metaKey}: ${
+                                    typeof metaValue === 'object'
+                                      ? JSON.stringify(metaValue)
+                                      : metaValue ?? '-'
+                                  }`
+                              )
+                              .join(' • ')
+                            : '';
+                          return (
+                            <tr key={event.id} className="hover:bg-[oklch(0.18_0.04_260)]">
+                              <td>{formatDate(event.wallClock)}</td>
+                              <td>{getPerfLabel(event.name)}</td>
+                              <td>{formatDurationMs(event.durationMs)}</td>
+                              <td className="max-w-xs whitespace-pre-wrap">
+                                {metaEntries || '-'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </section>
+
             <section className="space-y-4">
               <div className="flex items-center justify-between flex-wrap gap-3">
                 <h2 className="text-xl font-semibold text-[oklch(0.95_0.02_260)]">

@@ -14,6 +14,7 @@ import {
   type EmbeddingModelState,
 } from './embedding-runtime';
 import { USearchIndex, type USearchMatch } from './usearch';
+import { withPerfTimer } from './perf-monitor';
 
 type KnowledgeInput = {
   text: string;
@@ -130,17 +131,19 @@ const toStoredKnowledge = (item: KnowledgeItem): StoredKnowledge => ({
 });
 
 const openKnowledgeDb = () =>
-  openDB<RagDB>(DB_NAME, 1, {
-    upgrade(db) {
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, {
-          keyPath: 'id',
-          autoIncrement: false,
-        });
-        store.createIndex('by-updated', 'updatedAt');
-      }
-    },
-  });
+  withPerfTimer('idb:open', () =>
+    openDB<RagDB>(DB_NAME, 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          const store = db.createObjectStore(STORE_NAME, {
+            keyPath: 'id',
+            autoIncrement: false,
+          });
+          store.createIndex('by-updated', 'updatedAt');
+        }
+      },
+    })
+  );
 
 const loadPreference = () => {
   try {
@@ -180,7 +183,11 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     const existing = indexRef.current;
     if (!existing || existing.dimensions !== dim) {
       console.info('[RagContext] Membuat indeks HNSW baru', { dim });
-      indexRef.current = await USearchIndex.create(dim);
+      indexRef.current = await withPerfTimer(
+        'hnsw:createIndex',
+        () => USearchIndex.create(dim),
+        () => ({ dim })
+      );
     } else {
       console.info('[RagContext] Membersihkan indeks HNSW lama', { dim });
       existing.clear();
@@ -190,38 +197,56 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
 
   const rebuildIndex = (records: KnowledgeItem[]) => {
     const previous = indexReadyRef.current.catch(() => {});
-    const promise = previous.then(async () => {
-      console.info('[RagContext] Rebuild indeks HNSW dimulai', {
-        total: records.length,
+    const promise = previous
+      .then(() =>
+        withPerfTimer(
+          'hnsw:rebuild',
+          async () => {
+            console.info('[RagContext] Rebuild indeks HNSW dimulai', {
+              total: records.length,
+            });
+            if (!records.length) {
+              indexRef.current = null;
+              itemMapRef.current.clear();
+              console.info(
+                '[RagContext] Rebuild selesai, tidak ada item yang diindeks'
+              );
+              return;
+            }
+            const index = await ensureIndex(records[0].embeddingDim);
+            index.clear();
+            itemMapRef.current.clear();
+            const validEntries: { id: number; vector: Float32Array }[] = [];
+            for (const item of records) {
+              if (item.embedding.length !== index.dimensions) {
+                console.warn(
+                  `[RagContext] Skipping item ${item.id} due to dimension mismatch`
+                );
+                continue;
+              }
+              validEntries.push({ id: item.id, vector: item.embedding });
+              itemMapRef.current.set(item.id, item);
+            }
+            if (validEntries.length) {
+              await withPerfTimer(
+                'hnsw:addMany',
+                async () => {
+                  index.addMany(validEntries);
+                },
+                () => ({ count: validEntries.length })
+              );
+            }
+            console.info('[RagContext] Rebuild indeks HNSW selesai', {
+              indexed: validEntries.length,
+            });
+          },
+          () => ({ total: records.length })
+        )
+      )
+      .catch((err) => {
+        console.error('[RagContext] Failed to rebuild HNSW index', err);
+        throw err;
       });
-      if (!records.length) {
-        indexRef.current = null;
-        itemMapRef.current.clear();
-        console.info('[RagContext] Rebuild selesai, tidak ada item yang diindeks');
-        return;
-      }
-      const index = await ensureIndex(records[0].embeddingDim);
-      index.clear();
-      itemMapRef.current.clear();
-      const validEntries: { id: number; vector: Float32Array }[] = [];
-      for (const item of records) {
-        if (item.embedding.length !== index.dimensions) {
-          console.warn(
-            `[RagContext] Skipping item ${item.id} due to dimension mismatch`
-          );
-          continue;
-        }
-        validEntries.push({ id: item.id, vector: item.embedding });
-        itemMapRef.current.set(item.id, item);
-      }
-      index.addMany(validEntries);
-      console.info('[RagContext] Rebuild indeks HNSW selesai', {
-        indexed: validEntries.length,
-      });
-    }).catch((err) => {
-      console.error('[RagContext] Failed to rebuild HNSW index', err);
-      throw err;
-    });
     indexReadyRef.current = promise;
     return promise;
   };
@@ -233,7 +258,19 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
         const db = await openKnowledgeDb();
         if (cancelled) return;
         dbRef.current = db;
-        const stored = await db.getAll(STORE_NAME);
+        let entryCount = 0;
+        const stored = await withPerfTimer(
+          'idb:getAllKnowledge',
+          async () => {
+            const result = await db.getAll(STORE_NAME);
+            entryCount = result.length;
+            return result;
+          },
+          () => ({
+            store: STORE_NAME,
+            count: entryCount,
+          })
+        );
         if (cancelled) return;
         const list = stored.map(toKnowledgeItem);
         setItems(list);
@@ -253,13 +290,23 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
   const persistItem = async (item: KnowledgeItem) => {
     const db = dbRef.current;
     if (!db) throw new Error('Database belum siap');
-    await db.put(STORE_NAME, toStoredKnowledge(item));
+    await withPerfTimer(
+      'idb:putKnowledge',
+      () => db.put(STORE_NAME, toStoredKnowledge(item)),
+      () => ({
+        id: item.id,
+      })
+    );
   };
 
   const removeItemFromDb = async (id: number) => {
     const db = dbRef.current;
     if (!db) throw new Error('Database belum siap');
-    await db.delete(STORE_NAME, id);
+    await withPerfTimer(
+      'idb:deleteKnowledge',
+      () => db.delete(STORE_NAME, id),
+      () => ({ id })
+    );
   };
 
   const addKnowledge = async (input: KnowledgeInput) => {
@@ -576,7 +623,14 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
       topK: options?.topK ?? 5,
       dim: embedding.length,
     });
-    const hits: USearchMatch[] = index.search(embedding, options?.topK ?? 5);
+    const hits: USearchMatch[] = await withPerfTimer(
+      'hnsw:search',
+      () => index.search(embedding, options?.topK ?? 5),
+      () => ({
+        topK: options?.topK ?? 5,
+        dim: embedding.length,
+      })
+    );
     const mapped: RagSearchHit[] = [];
     for (const hit of hits) {
       const item = itemMapRef.current.get(hit.id);
@@ -600,15 +654,26 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     options?: { topK?: number }
   ) => {
     if (!text.trim()) return [];
-    const model = getCurrentEmbeddingModel();
-    if (!model) {
-      throw new Error('Load embedding model terlebih dahulu sebelum melakukan pencarian');
-    }
-    const embedding = await createEmbeddingVector(text);
-    console.info('[RagContext] Pencarian teks menghasilkan embedding', {
-      dim: embedding.length,
-    });
-    return searchByEmbedding(embedding, options);
+    return withPerfTimer(
+      'rag:search',
+      async () => {
+        const model = getCurrentEmbeddingModel();
+        if (!model) {
+          throw new Error(
+            'Load embedding model terlebih dahulu sebelum melakukan pencarian'
+          );
+        }
+        const embedding = await createEmbeddingVector(text);
+        console.info('[RagContext] Pencarian teks menghasilkan embedding', {
+          dim: embedding.length,
+        });
+        return searchByEmbedding(embedding, options);
+      },
+      () => ({
+        queryLength: text.length,
+        topK: options?.topK ?? 5,
+      })
+    );
   };
 
   const toggleRag = (enabled: boolean) => {
