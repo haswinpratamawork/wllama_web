@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { EmbeddingModelManager } from '@/lib/embeddingModelManager';
+import { storeLocalModelFiles } from '@/lib/localModelCache';
 
 interface Wllama {
   loadModel: (blobs: Blob[], config: any) => Promise<void>;
@@ -131,94 +132,125 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     }
   }, []);
 
-  const loadEmbeddingModel = useCallback(async (url: string, silent: boolean = false) => {
-    if (!url.trim()) {
-      setError('Please enter a model URL');
-      return;
-    }
-
-    // Prevent loading if already loading
-    if (isLoadingRef.current) {
-      console.log('Already loading a model, skipping...');
-      return;
-    }
-
-    // Check if already loaded with same URL
-    if (currentUrlRef.current === url && wllamaRef.current) {
-      if (!silent) setStatus('Embedding model already loaded');
-      return;
-    }
-
-    isLoadingRef.current = true;
-    setIsLoading(true);
-    setError('');
-    setLoadProgress(0);
-    if (!silent) setStatus('Initializing embedding model...');
-
-    try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const { Wllama, ModelManager } = WllamaModule;
-      const wllama = new Wllama(CONFIG_PATHS);
-      
-      if (!modelManagerRef.current) {
-        modelManagerRef.current = new ModelManager();
+  const loadEmbeddingModel = useCallback(
+    async (
+      url: string,
+      silent: boolean = false,
+      options: { sourceType?: EmbeddingSourceType; modelName?: string } = {}
+    ) => {
+      const trimmedUrl = url.trim();
+      if (!trimmedUrl) {
+        setError('Please enter a model URL');
+        return;
       }
 
-      if (!silent) setStatus('Downloading/loading embedding model...');
+      const sourceType = options.sourceType ?? 'remote';
 
-      const model = await modelManagerRef.current.getModelOrDownload(url, {
-        progressCallback: ({ loaded, total }: { loaded: number; total: number }) => {
-          if (total && !silent) {
-            const progressPercentage = Math.round((loaded / total) * 100);
-            setLoadProgress(progressPercentage);
-            setStatus(`Downloading embedding model... ${progressPercentage}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)`);
+      // Prevent loading if already loading
+      if (isLoadingRef.current) {
+        console.log('Already loading a model, skipping...');
+        return;
+      }
+
+      // Only dedupe remote loads with identical URL
+      if (
+        sourceType === 'remote' &&
+        currentUrlRef.current === trimmedUrl &&
+        wllamaRef.current
+      ) {
+        if (!silent) setStatus('Embedding model already loaded');
+        return;
+      }
+
+      isLoadingRef.current = true;
+      setIsLoading(true);
+      setError('');
+      setLoadProgress(0);
+      if (!silent) {
+        setStatus(
+          sourceType === 'remote'
+            ? 'Initializing embedding model...'
+            : 'Opening cached embedding model...'
+        );
+      }
+
+      try {
+        const WllamaModule = await import('@wllama/wllama/esm/index.js');
+        const { Wllama, ModelManager } = WllamaModule;
+        const wllama = new Wllama(CONFIG_PATHS);
+
+        if (!modelManagerRef.current) {
+          modelManagerRef.current = new ModelManager();
+        }
+
+        let modelEntry: any;
+        if (sourceType === 'local' || trimmedUrl.startsWith('local://')) {
+          const candidates = await modelManagerRef.current.getModels({
+            includeInvalid: true,
+          });
+          modelEntry = candidates.find((m: any) => m.url === trimmedUrl);
+          if (!modelEntry) {
+            throw new Error('Embedding model lokal tidak ditemukan di cache');
           }
-        },
-      });
+        } else {
+          modelEntry = await modelManagerRef.current.getModelOrDownload(trimmedUrl, {
+            progressCallback: ({ loaded, total }: { loaded: number; total: number }) => {
+              if (!total || silent) return;
+              const progressPercentage = Math.round((loaded / total) * 100);
+              setLoadProgress(progressPercentage);
+              setStatus(
+                `Downloading embedding model... ${progressPercentage}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)`
+              );
+            },
+          });
+        }
 
-      if (!silent) setStatus('Opening model blobs...');
-      const blobs = await model.open();
+        if (!silent) setStatus('Preparing embedding model shards...');
+        const blobs = await modelEntry.open();
 
-      const modelName = url.split('/').pop() || 'model';
-      if (!silent) setStatus('Loading embedding model into runtime...');
-      
-      await wllama.loadModel(blobs, {
-        embeddings: true,
-        n_ctx: 2048,
-        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
-      });
+        if (!silent) setStatus('Loading embedding model into runtime...');
+        await wllama.loadModel(blobs, {
+          embeddings: true,
+          n_ctx: 2048,
+          pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
+        });
 
-      finalizeLoad(wllama, {
-        sourceType: 'remote',
-        identifier: url,
-        modelName,
-        silent,
-        persistState: true,
-      });
-    } catch (err: any) {
-      const errorMsg = err?.message || String(err);
-      
-      if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
-        setError(
-          'Warning: model is too large for browser memory. Try:\n' +
-          '1. Close other tabs to free memory\n' +
-          '2. Use a smaller quantization (Q4_K_M, Q3_K_M)\n' +
-          '3. Restart your browser'
-        );
-      } else if (errorMsg.includes('unknown model architecture')) {
-        setError(
-          'Warning: unsupported GGUF architecture. Update wllama to a newer build or pick a model whose `general.architecture` is supported (for example, try a Nomic or BGE embedding model).'
-        );
-      } else {
-        setError('Failed to load embedding model: ' + errorMsg);
+        const modelName =
+          options.modelName ?? trimmedUrl.split('/').pop() ?? 'embedding-model.gguf';
+
+        finalizeLoad(wllama, {
+          sourceType,
+          identifier: sourceType === 'remote' ? trimmedUrl : null,
+          modelName,
+          silent,
+          persistState: true,
+        });
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err);
+
+        if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
+          setError(
+            'Warning: model is too large for browser memory. Try:\n' +
+            '1. Close other tabs to free memory\n' +
+            '2. Use a smaller quantization (Q4_K_M, Q3_K_M)\n' +
+            '3. Restart your browser'
+          );
+        } else if (errorMsg.includes('unknown model architecture')) {
+          setError(
+            'Warning: unsupported GGUF architecture. Update wllama to a newer build or pick a model whose `general.architecture` is supported (for example, try a Nomic or BGE embedding model).'
+          );
+        } else {
+          setError('Failed to load embedding model: ' + errorMsg);
+        }
+        setStatus('');
+        console.error(err);
+      } finally {
+        setIsLoading(false);
+        isLoadingRef.current = false;
       }
-      setStatus('');
-      console.error(err);
-    } finally {
-      setIsLoading(false);
-      isLoadingRef.current = false;
-    }
-  }, [finalizeLoad]);
+    },
+    [finalizeLoad]
+  );
 
   const downloadEmbeddingModelToCache = useCallback(async (url: string) => {
     if (!url.trim()) {
@@ -266,68 +298,50 @@ export function useEmbeddingModel(): UseEmbeddingModelReturn {
     }
   }, [isDownloading]);
 
-  const loadEmbeddingModelFromFiles = useCallback(async (files: FileList | File[]) => {
-    const fileArray = Array.from(files as any).filter(Boolean) as File[];
-    if (fileArray.length === 0) {
-      setError('Please select embedding model file(s) first');
-      return;
-    }
-
-    if (isLoadingRef.current) {
-      console.log('Already loading a model, skipping...');
-      return;
-    }
-
-    isLoadingRef.current = true;
-    setIsLoading(true);
-    setError('');
-    setLoadProgress(0);
-    setStatus('Initializing embedding model from files...');
-
-    try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const { Wllama } = WllamaModule;
-      const wllama = new Wllama(CONFIG_PATHS);
-
-      setStatus('Loading embedding model from local files...');
-
-      await wllama.loadModel(fileArray, {
-        embeddings: true,
-        n_ctx: 2048,
-        pooling_type: 'LLAMA_POOLING_TYPE_MEAN',
-      });
-
-      const modelName = fileArray.length === 1
-        ? fileArray[0].name
-        : `${fileArray[0].name} (+${fileArray.length - 1} parts)`;
-
-      finalizeLoad(wllama, {
-        sourceType: 'local',
-        identifier: null,
-        modelName,
-        silent: false,
-        persistState: true,
-      });
-    } catch (err: any) {
-      const errorMsg = err?.message || String(err);
-      if (errorMsg.includes('Invalid typed array length') || errorMsg.includes('Array buffer allocation failed')) {
-        setError(
-          'Warning: model file is too large for the browser to map into memory. Try using lower quantization shards or split the GGUF into smaller parts.'
-        );
-      } else if (errorMsg.includes('unknown model architecture')) {
-        setError(
-          'Warning: unsupported GGUF architecture. Make sure the file targets a llama.cpp build with this architecture or choose a compatible embedding model.'
-        );
-      } else {
-        setError('Failed to load embedding model from files: ' + errorMsg);
+  const loadEmbeddingModelFromFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const fileArray = Array.from(files as any).filter(Boolean) as File[];
+      if (fileArray.length === 0) {
+        setError('Please select embedding model file(s) first');
+        return;
       }
-      setStatus('');
-      console.error(err);
-    } finally {
-      setIsLoading(false);
-      isLoadingRef.current = false;
-    }
-  }, [finalizeLoad]);
+
+      try {
+        setError('');
+        setStatus('Caching embedding model shards to local storage...');
+        setLoadProgress(0);
+        setIsLoading(true);
+
+        const WllamaModule = await import('@wllama/wllama/esm/index.js');
+        const { ModelManager } = WllamaModule;
+
+        if (!modelManagerRef.current) {
+          modelManagerRef.current = new ModelManager();
+        }
+
+        const stored = await storeLocalModelFiles(fileArray, modelManagerRef.current, {
+          namespace: `embedding-${Date.now().toString(36)}`,
+        });
+
+        setStatus('Loading embedding model from cache...');
+        await loadEmbeddingModel(stored.modelUrl, false, {
+          sourceType: 'local',
+          modelName: stored.baseName,
+        });
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err);
+        if (errorMsg.includes('getDirectory')) {
+          setError('Browser tidak mendukung penyimpanan model lokal (OPFS). Gunakan Chrome terbaru atau alternatif berbasis Chromium.');
+        } else {
+          setError('Failed to load embedding model from files: ' + errorMsg);
+        }
+        setStatus('');
+        console.error(err);
+        setIsLoading(false);
+      }
+    },
+    [loadEmbeddingModel]
+  );
 
   const unloadEmbeddingModel = useCallback(() => {
     wllamaRef.current = null;

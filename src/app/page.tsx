@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useEmbeddingModel } from '@/hooks/useEmbeddingModel';
 import { ChatModelManager } from '@/lib/chatModelManager';
+import { storeLocalModelFiles } from '@/lib/localModelCache';
 import type { 
   Wllama, 
   WllamaConfig, 
@@ -14,6 +15,11 @@ import type {
   EmbeddingDocument 
 } from '@/types/wllama';
 import { Upload, Play, Loader2, Send, Trash2, User, Bot, Download, Save, Plus, MessageSquare, Menu, X, Globe, HardDrive, Database, BookOpen, Sparkles, FileStack, Check } from 'lucide-react';
+
+const WLLAMA_WASM_PATHS = {
+  'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
+  'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
+};
 
 export default function WllamaUI() {
   const {
@@ -69,6 +75,7 @@ export default function WllamaUI() {
   const [modelLoaded, setModelLoaded] = useState(false);
 
   const wllamaRef = useRef<Wllama | null>(null);
+  const chatModelManagerRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const embeddingFileInputRef = useRef<HTMLInputElement>(null);
   const embeddingSplitFileInputRef = useRef<HTMLInputElement>(null);
@@ -481,6 +488,89 @@ export default function WllamaUI() {
     }
   };
 
+  const loadChatModelFromEntry = async (
+    WllamaCtor: any,
+    modelEntry: any,
+    {
+      modelName,
+      sourceType,
+    }: {
+      modelName: string;
+      sourceType: 'remote' | 'local';
+    }
+  ) => {
+    setStatus('Opening chat model data...');
+    const blobs = await modelEntry.open();
+
+    const progressCallback = ({ loaded, total }: ProgressCallback) => {
+      if (!total) return;
+      const percent = Math.round((loaded / total) * 100);
+      const mapped = 80 + Math.round(percent * 0.2);
+      setLoadProgress(Math.min(99, mapped));
+      setStatus(`Loading chat model into runtime... ${percent}%`);
+    };
+
+    const config: WllamaConfig = {
+      n_ctx: nCtx,
+      n_batch: 2048,
+      n_threads: navigator.hardwareConcurrency || 8,
+      n_gpu_layers: 0,
+      use_mlock: false,
+      use_mmap: true,
+      progressCallback,
+    };
+
+    const start = performance.now();
+
+    wllamaRef.current = new WllamaCtor(WLLAMA_WASM_PATHS);
+
+    await wllamaRef.current.loadModel(blobs, config);
+
+    ChatModelManager.setModel(wllamaRef.current);
+    setModelLoaded(true);
+
+    const took = Math.round(performance.now() - start);
+    setStatus(
+      `${sourceType === 'local' ? 'Local' : 'Remote'} chat model loaded: ${modelName} (${took} ms)`
+    );
+    setLoadProgress(100);
+    setShowModelManager(false);
+
+    if (conversations.length === 0) {
+      createNewConversation();
+    }
+  };
+
+  const cacheAndLoadLocalChatModel = async (files: File[], labelHint?: string) => {
+    const WllamaModule = await import('@wllama/wllama/esm/index.js');
+    const { Wllama, ModelManager } = WllamaModule;
+
+    if (!chatModelManagerRef.current) {
+      chatModelManagerRef.current = new ModelManager();
+    }
+    const manager = chatModelManagerRef.current;
+
+    const stored = await storeLocalModelFiles(files, manager, {
+      namespace: `chat-${Date.now().toString(36)}`,
+    });
+
+    setLoadProgress(prev => (prev < 12 ? 12 : prev));
+    setStatus('Preparing cached chat model...');
+
+    const models = await manager.getModels({ includeInvalid: true });
+    const modelEntry = models.find((m: any) => m.url === stored.modelUrl);
+    if (!modelEntry) {
+      throw new Error('Failed to locate cached chat model entry');
+    }
+
+    await loadChatModelFromEntry(Wllama, modelEntry, {
+      modelName: labelHint ?? stored.baseName,
+      sourceType: 'local',
+    });
+
+    await loadCachedModels();
+  };
+
   const loadModelFromUrl = async (url: string) => {
     setIsLoading(true);
     setError('');
@@ -498,52 +588,41 @@ export default function WllamaUI() {
       }
 
       const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const Wllama = WllamaModule.Wllama;
+      const { Wllama, ModelManager } = WllamaModule;
 
-      const CONFIG_PATHS = {
-        'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
-        'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
-      };
-
-      wllamaRef.current = new Wllama(CONFIG_PATHS);
-
-      const progressCallback = ({ loaded, total }: ProgressCallback) => {
-        const progressPercentage = Math.round((loaded / total) * 100);
-        setLoadProgress(progressPercentage);
-        setStatus(`Loading model... ${progressPercentage}%`);
-      };
+      if (!chatModelManagerRef.current) {
+        chatModelManagerRef.current = new ModelManager();
+      }
+      const manager = chatModelManagerRef.current;
 
       setStatus('Downloading chat model...');
 
-      const start = Date.now();
+      const modelEntry = await manager.getModelOrDownload(fullUrl, {
+        progressCallback: ({ loaded, total }: { loaded: number; total: number }) => {
+          if (!total) return;
+          const percent = Math.round((loaded / total) * 100);
+          setLoadProgress(Math.min(79, Math.round(percent * 0.8)));
+          setStatus(
+            `Downloading chat model... ${percent}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)`
+          );
+        },
+      });
 
-      const config: WllamaConfig = {
-        n_ctx: nCtx,
-        n_batch: 2048,
-        n_threads: navigator.hardwareConcurrency || 8,
-        n_gpu_layers: 0,
-        use_mlock: false,
-        use_mmap: true,
-        progressCallback,
-      };
+      const modelName = decodeURIComponent(fullUrl.split('/').pop() || 'chat-model.gguf');
 
-      await wllamaRef.current.loadModelFromUrl(fullUrl, config);
-
-      ChatModelManager.setModel(wllamaRef.current);
-      setModelLoaded(true);
-
-      const took = Date.now() - start;
-      setStatus(`Chat model loaded successfully! (${took} ms)`);
-      setLoadProgress(100);
-      setShowModelManager(false);
-
-      if (conversations.length === 0) {
-        createNewConversation();
-      }
+      await loadChatModelFromEntry(Wllama, modelEntry, {
+        modelName,
+        sourceType: 'remote',
+      });
 
       await loadCachedModels();
     } catch (err: any) {
-      setError('Failed to load model: ' + (err?.message || String(err)));
+      const message = err?.message || String(err);
+      if (message.includes('getDirectory')) {
+        setError('Browser tidak mendukung penyimpanan model lokal (OPFS). Gunakan Chrome terbaru atau browser Chromium.');
+      } else {
+        setError('Failed to load model: ' + message);
+      }
       setStatus('');
       console.error(err);
     } finally {
@@ -577,54 +656,17 @@ export default function WllamaUI() {
     setIsLoading(true);
     setError('');
     setLoadProgress(0);
-    setStatus('Initializing Wllama...');
+    setStatus('Caching split model shards...');
 
     try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const Wllama = WllamaModule.Wllama;
-
-      const CONFIG_PATHS = {
-        'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
-        'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
-      };
-
-      wllamaRef.current = new Wllama(CONFIG_PATHS);
-
-      const progressCallback = ({ loaded, total }: ProgressCallback) => {
-        const progressPercentage = Math.round((loaded / total) * 100);
-        setLoadProgress(progressPercentage);
-        setStatus(`Loading split model... ${progressPercentage}%`);
-      };
-
-      setStatus('Loading split model files...');
-
-      const start = Date.now();
-
-      const config: WllamaConfig = {
-        n_ctx: nCtx,
-        n_batch: 2048,
-        n_threads: navigator.hardwareConcurrency || 8,
-        n_gpu_layers: 0,
-        use_mlock: false,
-        use_mmap: true,
-        progressCallback,
-      };
-
-      await wllamaRef.current.loadModel(files, config);
-
-      ChatModelManager.setModel(wllamaRef.current);
-      setModelLoaded(true);
-
-      const took = Date.now() - start;
-      setStatus(`Split model loaded successfully! (${took} ms)`);
-      setLoadProgress(100);
-      setShowModelManager(false);
-
-      if (conversations.length === 0) {
-        createNewConversation();
-      }
+      await cacheAndLoadLocalChatModel(files);
     } catch (err: any) {
-      setError('Failed to load split model: ' + (err?.message || String(err)));
+      const message = err?.message || String(err);
+      if (message.includes('OPFS')) {
+        setError('Browser tidak mendukung penyimpanan model lokal (OPFS). Gunakan Chrome terbaru atau browser Chromium.');
+      } else {
+        setError('Failed to load split model: ' + message);
+      }
       setStatus('');
       console.error(err);
     } finally {
@@ -634,7 +676,7 @@ export default function WllamaUI() {
 
   const loadSplitFromUrls = async () => {
     const validUrls = splitUrls.filter(url => url.trim() !== '');
-    
+
     if (validUrls.length === 0) {
       setError('Please add at least one split model URL');
       return;
@@ -647,27 +689,34 @@ export default function WllamaUI() {
 
     try {
       const blobs: File[] = [];
-      
+
       for (let i = 0; i < validUrls.length; i++) {
         const url = validUrls[i];
         setStatus(`Downloading split ${i + 1}/${validUrls.length}...`);
-        
+
         const response = await fetch(url);
-        
+
         if (!response.ok) {
           throw new Error(`Failed to fetch ${url}: ${response.statusText}`);
         }
-        
+
         const blob = await response.blob();
         const filename = url.split('/').pop() || `split-${i}.gguf`;
-        const file = new File([blob], filename, { type: 'application/octet-stream' });
-        blobs.push(file);
+        blobs.push(new File([blob], filename, { type: 'application/octet-stream' }));
       }
 
-      await loadSplitModel(blobs);
+      setStatus('Caching downloaded splits...');
+      await cacheAndLoadLocalChatModel(blobs);
     } catch (err: any) {
-      setError('Failed to load split models from URLs: ' + (err?.message || String(err)));
+      const message = err?.message || String(err);
+      if (message.includes('OPFS')) {
+        setError('Browser tidak mendukung penyimpanan model lokal (OPFS). Gunakan Chrome terbaru atau browser Chromium.');
+      } else {
+        setError('Failed to load split models from URLs: ' + message);
+      }
       setStatus('');
+      console.error(err);
+    } finally {
       setIsLoading(false);
     }
   };
@@ -692,58 +741,22 @@ export default function WllamaUI() {
       return;
     }
 
+    const filesToLoad = Array.from(modelFile);
+
     setIsLoading(true);
     setError('');
     setLoadProgress(0);
-    setStatus('Initializing Wllama...');
+    setStatus('Caching local chat model shards...');
 
     try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const Wllama = WllamaModule.Wllama;
-
-      const CONFIG_PATHS = {
-        'single-thread/wllama.wasm': './wllama/esm/single-thread/wllama.wasm',
-        'multi-thread/wllama.wasm': './wllama/esm/multi-thread/wllama.wasm',
-      };
-
-      wllamaRef.current = new Wllama(CONFIG_PATHS);
-
-      const progressCallback = ({ loaded, total }: ProgressCallback) => {
-        const progressPercentage = Math.round((loaded / total) * 100);
-        setLoadProgress(progressPercentage);
-        setStatus(`Loading model... ${progressPercentage}%`);
-      };
-
-      setStatus('Loading model from files...');
-
-      const start = Date.now();
-
-      const config: WllamaConfig = {
-        n_ctx: nCtx,
-        n_batch: 2048,
-        n_threads: navigator.hardwareConcurrency || 8,
-        n_gpu_layers: 0,
-        use_mlock: false,
-        use_mmap: true,
-        progressCallback,
-      };
-
-      const filesToLoad = Array.from(modelFile);
-      await wllamaRef.current.loadModel(filesToLoad, config);
-
-      ChatModelManager.setModel(wllamaRef.current);
-      setModelLoaded(true);
-
-      const took = Date.now() - start;
-      setStatus(`Model loaded successfully! (${took} ms)`);
-      setLoadProgress(100);
-      setShowModelManager(false);
-
-      if (conversations.length === 0) {
-        createNewConversation();
-      }
+      await cacheAndLoadLocalChatModel(filesToLoad);
     } catch (err: any) {
-      setError('Failed to load model: ' + (err?.message || String(err)));
+      const message = err?.message || String(err);
+      if (message.includes('OPFS')) {
+        setError('Browser tidak mendukung penyimpanan model lokal (OPFS). Gunakan Chrome terbaru atau browser Chromium.');
+      } else {
+        setError('Failed to load model: ' + message);
+      }
       setStatus('');
       console.error(err);
     } finally {

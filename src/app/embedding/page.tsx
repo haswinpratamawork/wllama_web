@@ -63,7 +63,6 @@ export default function EmbeddingPage() {
         if (!db.objectStoreNames.contains('embeddings')) {
           const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
           // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
-          // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
         }
       };
     };
