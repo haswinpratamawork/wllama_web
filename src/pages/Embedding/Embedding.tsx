@@ -8,7 +8,6 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  createEmbeddingVector,
   DEFAULT_EMBEDDING_MODEL,
   getSavedEmbeddingPreference,
   loadEmbeddingModel,
@@ -18,6 +17,7 @@ import {
 import {
   useRag,
   type KnowledgeItem,
+  type KnowledgeImportRecord,
   type RagSearchHit,
 } from '../../utils/rag.context';
 
@@ -26,31 +26,18 @@ const formatDate = (value: number) =>
     hour12: false,
   });
 
-const clampPreview = (vector: Float32Array | null, take: number) => {
-  if (!vector) return null;
-  const slice = vector.slice(0, take);
-  return Array.from(slice);
-};
-
 export default function EmbeddingPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const knowledgeJsonInputRef = useRef<HTMLInputElement | null>(null);
   const autoLoadAttempted = useRef(false);
 
   const [status, setStatus] = useState<string>('idle');
   const [progressPercent, setProgressPercent] = useState<number | null>(null);
   const [modelUrl, setModelUrl] = useState<string>(DEFAULT_EMBEDDING_MODEL);
-  const [text, setText] = useState(
-    'Saya sedang menguji embedding Gemma untuk demo WASM di browser.'
-  );
-  const [embeddingPreview, setEmbeddingPreview] =
-    useState<Float32Array | null>(null);
-  const [embeddingBusy, setEmbeddingBusy] = useState(false);
-
-  const [form, setForm] = useState<{ title: string; content: string; url: string }>(
-    { title: '', content: '', url: '' }
-  );
+  const [formText, setFormText] = useState<string>('');
   const [editing, setEditing] = useState<KnowledgeItem | null>(null);
   const [savingKnowledge, setSavingKnowledge] = useState(false);
+  const [importingKnowledge, setImportingKnowledge] = useState(false);
 
   const [searchText, setSearchText] = useState('');
   const [searchResults, setSearchResults] = useState<RagSearchHit[]>([]);
@@ -63,6 +50,7 @@ export default function EmbeddingPage() {
     updateKnowledge,
     deleteKnowledge,
     reembedKnowledge,
+    importKnowledgeFromJson,
     searchByText,
     items,
     embeddingModel,
@@ -74,11 +62,6 @@ export default function EmbeddingPage() {
   const sortedItems = useMemo(() => {
     return [...items].sort((a, b) => b.updatedAt - a.updatedAt);
   }, [items]);
-
-  const embeddingPreviewNumbers = useMemo(
-    () => clampPreview(embeddingPreview, 64),
-    [embeddingPreview]
-  );
 
   useEffect(() => {
     if (embeddingModel) {
@@ -108,8 +91,7 @@ export default function EmbeddingPage() {
     })
       .then(() => {
         setStatus(
-          `model ready — ${
-            saved.name ?? saved.url.split('/').pop() ?? saved.url
+          `model ready — ${saved.name ?? saved.url.split('/').pop() ?? saved.url
           }`
         );
       })
@@ -170,65 +152,80 @@ export default function EmbeddingPage() {
     }
   };
 
+  const handleUploadKnowledgeJson = async (files: FileList | null) => {
+    if (!files || files.length === 0 || importingKnowledge) return;
+    const file = files[0];
+    setImportingKnowledge(true);
+    try {
+      setStatus(`memuat knowledge dari ${file.name}`);
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText);
+      if (!Array.isArray(parsed)) {
+        throw new Error('File JSON harus berupa array knowledge');
+      }
+      const normalized = parsed.filter(
+        (item: any): item is KnowledgeImportRecord =>
+          item &&
+          typeof item === 'object' &&
+          typeof item.text === 'string'
+      );
+      if (!normalized.length) {
+        throw new Error('Tidak ada record valid pada JSON');
+      }
+      const result = await importKnowledgeFromJson(normalized);
+      const summaryParts: string[] = [];
+      if (result.imported) summaryParts.push(`${result.imported} baru`);
+      if (result.updated) summaryParts.push(`${result.updated} diperbarui`);
+      if (result.skipped) summaryParts.push(`${result.skipped} dilewati`);
+      setStatus(
+        summaryParts.length
+          ? `Impor knowledge selesai (${summaryParts.join(', ')})`
+          : 'Impor knowledge selesai'
+      );
+      if (result.errors.length) {
+        console.warn(
+          '[EmbeddingPage] Beberapa record gagal diimpor',
+          result.errors
+        );
+      }
+    } catch (err: any) {
+      console.error('[EmbeddingPage] Gagal mengimpor knowledge', err);
+      setStatus('gagal mengimpor knowledge: ' + (err?.message ?? String(err)));
+    } finally {
+      setImportingKnowledge(false);
+      if (knowledgeJsonInputRef.current) {
+        knowledgeJsonInputRef.current.value = '';
+      }
+    }
+  };
+
   const handleResetRuntime = async () => {
     await resetEmbeddingRuntime();
-    setEmbeddingPreview(null);
     setStatus('runtime reset — model unloaded');
   };
 
-  const handleCreateEmbedding = async () => {
-    if (!modelLoaded) {
-      setStatus('load a model first');
-      return;
-    }
-    if (!text.trim()) {
-      setStatus('type some text to embed');
-      return;
-    }
-    setEmbeddingBusy(true);
-    try {
-      setStatus('creating embedding');
-      const vec = await createEmbeddingVector(text);
-      setEmbeddingPreview(vec);
-      setStatus(
-        `embedding created (length ${vec.length.toLocaleString()})`
-      );
-    } catch (err: any) {
-      console.error(err);
-      setStatus('embedding failed: ' + (err?.message ?? String(err)));
-    } finally {
-      setEmbeddingBusy(false);
-    }
-  };
-
   const resetForm = () => {
-    setForm({ title: '', content: '', url: '' });
+    setFormText('');
     setEditing(null);
   };
 
   const handleKnowledgeSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    const title = form.title.trim();
-    const content = form.content.trim();
-    const url = form.url.trim();
-    if (!title || !content) {
-      setStatus('isi judul dan konten terlebih dahulu');
+    const text = formText.trim();
+    if (!text) {
+      setStatus('isi teks knowledge terlebih dahulu');
       return;
     }
     setSavingKnowledge(true);
     try {
       if (editing) {
         await updateKnowledge(editing.id, {
-          title,
-          content,
-          url: url || undefined,
+          text,
         });
         setStatus('knowledge updated');
       } else {
         await addKnowledge({
-          title,
-          content,
-          url: url || undefined,
+          text,
         });
         setStatus('knowledge added');
       }
@@ -243,15 +240,14 @@ export default function EmbeddingPage() {
 
   const handleEditKnowledge = (item: KnowledgeItem) => {
     setEditing(item);
-    setForm({
-      title: item.title,
-      content: item.content,
-      url: item.url ?? '',
-    });
+    setFormText(item.text);
   };
 
   const handleDeleteKnowledge = async (item: KnowledgeItem) => {
-    const confirmed = window.confirm(`Hapus "${item.title}" dari knowledge?`);
+    const preview = item.text.slice(0, 80);
+    const confirmed = window.confirm(
+      `Hapus knowledge berikut?\n\n${preview}${item.text.length > 80 ? '...' : ''}`
+    );
     if (!confirmed) return;
     try {
       await deleteKnowledge(item.id);
@@ -267,7 +263,7 @@ export default function EmbeddingPage() {
 
   const handleReembedKnowledge = async (item: KnowledgeItem) => {
     try {
-      setStatus(`re-embedding "${item.title}"`);
+      setStatus(`re-embedding knowledge #${item.id}`);
       await reembedKnowledge(item.id);
       setStatus('knowledge re-embedded');
     } catch (err: any) {
@@ -287,7 +283,7 @@ export default function EmbeddingPage() {
     }
     setSearching(true);
     try {
-      const hits = await searchByText(query, { topK: 5 });
+      const hits = await searchByText(query, { topK: 50 });
       setSearchResults(hits);
       setStatus(
         hits.length
@@ -321,11 +317,10 @@ export default function EmbeddingPage() {
             </div>
             <div className="flex flex-col items-end gap-2">
               <div
-                className={`px-3 py-1 rounded-full text-sm font-medium ${
-                  modelLoaded
+                className={`px-3 py-1 rounded-full text-sm font-medium ${modelLoaded
                     ? 'bg-[oklch(0.4_0.2_150)] text-[oklch(0.95_0.02_150)]'
                     : 'bg-[oklch(0.4_0.1_80)] text-[oklch(0.95_0.02_80)]'
-                }`}
+                  }`}
               >
                 {modelLoaded ? 'Model ready' : 'Model not loaded'}
               </div>
@@ -416,59 +411,6 @@ export default function EmbeddingPage() {
               </div>
             </section>
 
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-3">
-                <h2 className="text-xl font-semibold text-[oklch(0.95_0.02_260)]">
-                  Coba buat embedding
-                </h2>
-                <textarea
-                  className="w-full rounded-lg border border-[oklch(0.25_0.04_260)] shadow-sm p-3 text-sm focus:outline-none focus:ring-2 focus:ring-[oklch(0.6_0.1_260)] resize-none bg-[oklch(0.18_0.04_260)] text-[oklch(0.95_0.02_260)]"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  rows={5}
-                />
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[oklch(0.3_0.12_270)] text-[oklch(0.98_0.02_260)] text-sm font-medium hover:opacity-95 disabled:opacity-60"
-                    onClick={handleCreateEmbedding}
-                    disabled={embeddingBusy}
-                  >
-                    {embeddingBusy ? 'Creating...' : 'Create embedding'}
-                  </button>
-                  <button
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[oklch(0.25_0.04_260)] text-sm bg-[oklch(0.18_0.04_260)] hover:bg-[oklch(0.22_0.05_260)]"
-                    onClick={() => {
-                      setEmbeddingPreview(null);
-                      setStatus('idle');
-                    }}
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="bg-[oklch(0.2_0.05_260)] border border-[oklch(0.25_0.04_260)] rounded-lg p-4">
-                  <div className="font-semibold text-[oklch(0.95_0.02_260)] mb-2">
-                    Embedding preview
-                  </div>
-                  <div className="text-xs text-[oklch(0.7_0.02_260)]">
-                    Panjang vector:{' '}
-                    <span className="font-medium text-[oklch(0.95_0.02_260)]">
-                      {embeddingPreview
-                        ? embeddingPreview.length.toLocaleString()
-                        : '-'}
-                    </span>
-                  </div>
-                  <pre className="mt-2 text-xs whitespace-pre-wrap break-all text-[oklch(0.75_0.03_260)] bg-[oklch(0.18_0.04_260)] rounded-lg p-3 border border-[oklch(0.25_0.04_260)] max-h-60 overflow-auto">
-                    {embeddingPreviewNumbers
-                      ? JSON.stringify(embeddingPreviewNumbers, null, 2)
-                      : '—'}
-                  </pre>
-                </div>
-              </div>
-            </section>
-
             <section className="space-y-5">
               <div className="flex items-center justify-between flex-wrap gap-3">
                 <h2 className="text-xl font-semibold text-[oklch(0.95_0.02_260)]">
@@ -479,60 +421,47 @@ export default function EmbeddingPage() {
                 </div>
               </div>
 
+              <div className="bg-[oklch(0.2_0.05_260)] border border-[oklch(0.25_0.04_260)] rounded-lg p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-[oklch(0.95_0.02_260)]">
+                    Upload JSON knowledge
+                  </div>
+                  <p className="text-xs text-[oklch(0.7_0.02_260)]">
+                    Gunakan schema {`{ id, text, embedding }`} untuk mengimpor beberapa knowledge sekaligus.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    ref={knowledgeJsonInputRef}
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={(e) => handleUploadKnowledgeJson(e.target.files)}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-accent"
+                    onClick={() => knowledgeJsonInputRef.current?.click()}
+                    disabled={importingKnowledge}
+                  >
+                    {importingKnowledge ? 'Mengimpor...' : 'Upload JSON'}
+                  </button>
+                </div>
+              </div>
+
               <form
                 onSubmit={handleKnowledgeSubmit}
-                className="grid grid-cols-1 gap-4 bg-[oklch(0.2_0.05_260)] border border-[oklch(0.25_0.04_260)] rounded-lg p-4"
+                className="space-y-4 bg-[oklch(0.2_0.05_260)] border border-[oklch(0.25_0.04_260)] rounded-lg p-4"
               >
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <label className="space-y-2">
-                    <span className="block text-sm font-medium text-[oklch(0.8_0.02_260)]">
-                      Judul
-                    </span>
-                    <input
-                      type="text"
-                      className="input input-sm w-full bg-[oklch(0.18_0.04_260)]"
-                      value={form.title}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          title: e.target.value,
-                        }))
-                      }
-                      placeholder="Judul knowledge"
-                    />
-                  </label>
-                  <label className="space-y-2">
-                    <span className="block text-sm font-medium text-[oklch(0.8_0.02_260)]">
-                      URL (opsional)
-                    </span>
-                    <input
-                      type="url"
-                      className="input input-sm w-full bg-[oklch(0.18_0.04_260)]"
-                      value={form.url}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          url: e.target.value,
-                        }))
-                      }
-                      placeholder="https://..."
-                    />
-                  </label>
-                </div>
-                <label className="space-y-2">
+                <label className="space-y-2 block">
                   <span className="block text-sm font-medium text-[oklch(0.8_0.02_260)]">
-                    Konten
+                    Teks knowledge
                   </span>
                   <textarea
-                    className="textarea textarea-sm w-full min-h-[150px] bg-[oklch(0.18_0.04_260)]"
-                    value={form.content}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        content: e.target.value,
-                      }))
-                    }
-                    placeholder="Masukkan konten yang ingin ditambahkan ke knowledge base"
+                    className="textarea textarea-sm w-full min-h-[160px] bg-[oklch(0.18_0.04_260)]"
+                    value={formText}
+                    onChange={(e) => setFormText(e.target.value)}
+                    placeholder="Tuliskan pengetahuan yang ingin kamu simpan untuk RAG"
                   />
                 </label>
                 <div className="flex flex-wrap gap-3 justify-end">
@@ -592,16 +521,13 @@ export default function EmbeddingPage() {
                           className="border border-[oklch(0.25_0.04_260)] rounded-lg p-3 bg-[oklch(0.18_0.04_260)]"
                         >
                           <div className="flex justify-between gap-3 text-sm">
-                            <div className="font-semibold text-[oklch(0.95_0.02_260)]">
-                              {hit.item.title}
-                            </div>
+                            <p className="font-semibold text-[oklch(0.95_0.02_260)] line-clamp-3">
+                              {hit.item.text}
+                            </p>
                             <div className="text-[oklch(0.6_0.02_260)]">
                               score {hit.score.toFixed(3)}
                             </div>
                           </div>
-                          <p className="text-xs text-[oklch(0.7_0.02_260)] mt-1 line-clamp-2">
-                            {hit.item.content}
-                          </p>
                         </div>
                       ))}
                     </div>
@@ -621,22 +547,10 @@ export default function EmbeddingPage() {
                         key={item.id}
                         className="border border-[oklch(0.25_0.04_260)] rounded-lg p-4 bg-[oklch(0.2_0.05_260)] space-y-3"
                       >
-                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                          <div>
-                            <div className="text-lg font-semibold text-[oklch(0.95_0.02_260)]">
-                              {item.title}
-                            </div>
-                            {item.url && (
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-xs text-[oklch(0.7_0.02_260)] underline"
-                              >
-                                {item.url}
-                              </a>
-                            )}
-                          </div>
+                        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-2">
+                          <p className="text-sm text-[oklch(0.95_0.02_260)] whitespace-pre-wrap flex-1">
+                            {item.text}
+                          </p>
                           <div className="text-xs text-[oklch(0.6_0.02_260)] text-right space-y-1">
                             <div>Updated {formatDate(item.updatedAt)}</div>
                             <div>
@@ -645,9 +559,6 @@ export default function EmbeddingPage() {
                             </div>
                           </div>
                         </div>
-                        <p className="text-sm text-[oklch(0.75_0.03_260)] whitespace-pre-wrap">
-                          {item.content}
-                        </p>
                         <div className="flex flex-wrap gap-2 justify-end">
                           <button
                             className="btn btn-xs"
@@ -680,4 +591,3 @@ export default function EmbeddingPage() {
     </div>
   );
 }
-

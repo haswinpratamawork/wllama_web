@@ -16,23 +16,27 @@ import {
 import { USearchIndex, type USearchMatch } from './usearch';
 
 type KnowledgeInput = {
-  title: string;
-  content: string;
-  url?: string;
-  tags?: string[];
+  text: string;
 };
 
-type StoredKnowledge = KnowledgeInput & {
+type StoredKnowledge = {
   id: number;
+  text: string;
   embedding: number[];
   embeddingDim: number;
   modelUrl?: string;
   createdAt: number;
   updatedAt: number;
+  // legacy fields kept for migration from previous schema
+  title?: string;
+  content?: string;
+  url?: string;
+  tags?: string[];
 };
 
-export type KnowledgeItem = KnowledgeInput & {
+export type KnowledgeItem = {
   id: number;
+  text: string;
   embedding: Float32Array;
   embeddingDim: number;
   modelUrl?: string;
@@ -44,6 +48,19 @@ export type RagSearchHit = {
   item: KnowledgeItem;
   score: number;
   distance: number;
+};
+
+export type KnowledgeImportRecord = {
+  id?: number | string;
+  text: string;
+  embedding?: number[] | Float32Array;
+};
+
+export type KnowledgeImportResult = {
+  imported: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
 };
 
 interface RagDB extends DBSchema {
@@ -63,6 +80,9 @@ interface RagContextValue {
   updateKnowledge(id: number, patch: KnowledgeInput): Promise<KnowledgeItem>;
   deleteKnowledge(id: number): Promise<void>;
   reembedKnowledge(id: number): Promise<KnowledgeItem>;
+  importKnowledgeFromJson(
+    records: KnowledgeImportRecord[]
+  ): Promise<KnowledgeImportResult>;
   searchByText(
     text: string,
     options?: { topK?: number }
@@ -84,10 +104,10 @@ const RAG_PREF_KEY = 'rag_enabled';
 
 const toKnowledgeItem = (stored: StoredKnowledge): KnowledgeItem => ({
   id: stored.id,
-  title: stored.title,
-  content: stored.content,
-  url: stored.url,
-  tags: stored.tags ?? [],
+  text:
+    stored.text ??
+    [stored.title, stored.content].filter(Boolean).join('\n\n') ??
+    '',
   embedding: Float32Array.from(stored.embedding),
   embeddingDim: stored.embeddingDim,
   modelUrl: stored.modelUrl,
@@ -97,10 +117,11 @@ const toKnowledgeItem = (stored: StoredKnowledge): KnowledgeItem => ({
 
 const toStoredKnowledge = (item: KnowledgeItem): StoredKnowledge => ({
   id: item.id,
-  title: item.title,
-  content: item.content,
-  url: item.url,
-  tags: item.tags ?? [],
+  text: item.text,
+  title: undefined,
+  content: undefined,
+  url: undefined,
+  tags: undefined,
   embedding: Array.from(item.embedding),
   embeddingDim: item.embeddingDim,
   modelUrl: item.modelUrl,
@@ -244,9 +265,14 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
   const addKnowledge = async (input: KnowledgeInput) => {
     const model = getCurrentEmbeddingModel();
     if (!model) {
-      throw new Error('Load embedding model terlebih dahulu sebelum menambah knowledge');
+      throw new Error(
+        'Load embedding model terlebih dahulu sebelum menambah knowledge'
+      );
     }
-    const text = `${input.title}\n\n${input.content}`;
+    const text = input.text.trim();
+    if (!text) {
+      throw new Error('Teks knowledge tidak boleh kosong');
+    }
     const embedding = await createEmbeddingVector(text);
     if (indexRef.current && embedding.length !== indexRef.current.dimensions) {
       throw new Error(
@@ -256,8 +282,8 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     const id = Date.now();
     const now = Date.now();
     const item: KnowledgeItem = {
-      ...input,
       id,
+      text,
       embedding,
       embeddingDim: embedding.length,
       modelUrl: model.url,
@@ -279,20 +305,22 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     if (!existing) {
       throw new Error('Knowledge tidak ditemukan');
     }
-    const shouldReembed =
-      patch.content !== existing.content || patch.title !== existing.title;
+    const text = patch.text.trim();
+    if (!text) {
+      throw new Error('Teks knowledge tidak boleh kosong');
+    }
+
     let embedding = existing.embedding;
     let embeddingDim = existing.embeddingDim;
     let modelUrl = existing.modelUrl;
 
-    if (shouldReembed) {
+    if (text !== existing.text) {
       const model = getCurrentEmbeddingModel();
       if (!model) {
         throw new Error(
           'Load embedding model terlebih dahulu sebelum memperbarui knowledge'
         );
       }
-      const text = `${patch.title}\n\n${patch.content}`;
       embedding = await createEmbeddingVector(text);
       if (
         indexRef.current &&
@@ -308,7 +336,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
 
     const updated: KnowledgeItem = {
       ...existing,
-      ...patch,
+      text,
       embedding,
       embeddingDim,
       modelUrl,
@@ -343,8 +371,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     if (!model) {
       throw new Error('Load embedding model terlebih dahulu');
     }
-    const text = `${existing.title}\n\n${existing.content}`;
-    const embedding = await createEmbeddingVector(text);
+    const embedding = await createEmbeddingVector(existing.text);
     if (indexRef.current && embedding.length !== indexRef.current.dimensions) {
       throw new Error(
         'Dimensi embedding baru tidak cocok dengan indeks yang sudah ada.'
@@ -365,6 +392,159 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
     });
     itemMapRef.current.set(updated.id, updated);
     return updated;
+  };
+
+  const importKnowledgeFromJson = async (
+    records: KnowledgeImportRecord[]
+  ): Promise<KnowledgeImportResult> => {
+    if (!records.length) {
+      return { imported: 0, updated: 0, skipped: 0, errors: [] };
+    }
+
+    const needEmbeddingGeneration = records.some(
+      (rec) => !rec.embedding || rec.embedding.length === 0
+    );
+    const model = needEmbeddingGeneration ? getCurrentEmbeddingModel() : null;
+    if (needEmbeddingGeneration && !model) {
+      throw new Error(
+        'Load embedding model terlebih dahulu sebelum mengimpor knowledge tanpa embedding'
+      );
+    }
+
+    const currentDim = (() => {
+      const iterator = itemMapRef.current.values().next();
+      if (!iterator.done) return iterator.value.embeddingDim;
+      return indexRef.current?.dimensions ?? null;
+    })();
+
+    const results: KnowledgeImportResult = {
+      imported: 0,
+      updated: 0,
+      skipped: 0,
+      errors: [],
+    };
+
+    const prepared = new Map<number, KnowledgeItem>();
+    const existedBefore = new Map<number, boolean>();
+    let autoIdSeed = Date.now();
+
+    for (const record of records) {
+      try {
+        if (!record || typeof record !== 'object') {
+          throw new Error('Record bukan objek');
+        }
+        if (typeof record.text !== 'string') {
+          throw new Error('Field "text" wajib berupa string');
+        }
+        const trimmed = record.text.trim();
+        if (!trimmed) {
+          throw new Error('Field "text" wajib diisi');
+        }
+
+        let numericId: number;
+        if (
+          record.id !== undefined &&
+          record.id !== null &&
+          record.id !== ''
+        ) {
+          const maybeNumber =
+            typeof record.id === 'number'
+              ? record.id
+              : Number.parseInt(String(record.id), 10);
+          if (Number.isFinite(maybeNumber)) {
+            numericId = maybeNumber;
+          } else {
+            throw new Error('Field "id" harus numerik');
+          }
+        } else {
+          numericId = autoIdSeed;
+          autoIdSeed += 1;
+        }
+
+        while (prepared.has(numericId)) {
+          numericId += 1;
+        }
+
+        const existingItem = itemMapRef.current.get(numericId);
+
+        let vector: Float32Array;
+        let modelUrl: string | undefined;
+        if (record.embedding && record.embedding.length) {
+          vector = Float32Array.from(record.embedding);
+          modelUrl = 'json-import';
+        } else {
+          vector = await createEmbeddingVector(trimmed);
+          modelUrl = model?.url;
+        }
+
+        if (!vector.length) {
+          throw new Error('Embedding kosong');
+        }
+        if (currentDim !== null && vector.length !== currentDim) {
+          throw new Error(
+            `Dimensi embedding ${vector.length} tidak cocok dengan existing ${currentDim}`
+          );
+        }
+        const firstPreparedValue = prepared.values().next().value;
+        if (
+          prepared.size > 0 &&
+          firstPreparedValue &&
+          vector.length !== firstPreparedValue.embeddingDim
+        ) {
+          throw new Error('Dimensi embedding antar record tidak konsisten');
+        }
+
+        const timestamp = Date.now();
+        const text = trimmed;
+        const item: KnowledgeItem = {
+          id: numericId,
+          text,
+          embedding: vector,
+          embeddingDim: vector.length,
+          modelUrl,
+          createdAt: existingItem?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+        };
+
+        prepared.set(numericId, item);
+        existedBefore.set(numericId, existingItem !== undefined);
+      } catch (err: any) {
+        results.skipped += 1;
+        results.errors.push(err?.message ?? String(err));
+      }
+    }
+
+    if (prepared.size === 0) {
+      return results;
+    }
+
+    await Promise.all(
+      Array.from(prepared.values()).map((item) => persistItem(item))
+    );
+
+    setItems((prev) => {
+      const map = new Map<number, KnowledgeItem>();
+      for (const item of prev) {
+        map.set(item.id, item);
+      }
+      for (const item of prepared.values()) {
+        map.set(item.id, item);
+      }
+      const next = Array.from(map.values());
+      void rebuildIndex(next);
+      return next;
+    });
+
+    for (const item of prepared.values()) {
+      itemMapRef.current.set(item.id, item);
+      if (existedBefore.get(item.id)) {
+        results.updated += 1;
+      } else {
+        results.imported += 1;
+      }
+    }
+
+    return results;
   };
 
   const waitForIndexReady = async () => {
@@ -448,6 +628,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
       updateKnowledge,
       deleteKnowledge,
       reembedKnowledge,
+      importKnowledgeFromJson,
       searchByText,
       searchByEmbedding,
       latestHits,
@@ -463,6 +644,7 @@ export const RagProvider = ({ children }: { children: React.ReactNode }) => {
       updateKnowledge,
       deleteKnowledge,
       reembedKnowledge,
+      importKnowledgeFromJson,
       searchByText,
       searchByEmbedding,
       latestHits,

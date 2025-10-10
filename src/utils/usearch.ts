@@ -43,6 +43,7 @@ const cosineSimilarity = (a: Float32Array, b: Float32Array): number => {
     normA += va * va;
     normB += vb * vb;
   }
+  console.log("kenaa")
   if (normA === 0 || normB === 0) return 0;
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 };

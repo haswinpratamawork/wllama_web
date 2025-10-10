@@ -80,18 +80,17 @@ export default function ChatScreen() {
     try {
       if (ragEnabled) {
         try {
-          const hits = await searchByText(userInput, { topK: 5 });
+          const hits = await searchByText(userInput, { topK: 2 });
           if (hits.length) {
             setRagContext(hits);
             setRagNotice(
               `RAG aktif: menambahkan ${hits.length} knowledge ke prompt`
             );
             const knowledgeBlocks = hits
-              .map((hit, index) => {
-                const urlLine = hit.item.url ? `Sumber: ${hit.item.url}\n` : '';
-                return `### Knowledge ${index + 1}\nJudul: ${hit.item.title
-                  }\n${urlLine}Konten:\n${hit.item.content}`;
-              })
+              .map(
+                (hit, index) =>
+                  `### Knowledge ${index + 1}\n${hit.item.text}`
+              )
               .join('\n\n');
             const systemMsg: Message = {
               id: baseId - 1,
@@ -173,19 +172,14 @@ export default function ChatScreen() {
             {ragContext.slice(0, 3).map((hit) => (
               <div key={hit.item.id} className="space-y-1">
                 <div className="font-medium text-base-content/90">
-                  {hit.item.title}{' '}
+                  Knowledge #{hit.item.id}{' '}
                   <span className="text-[0.7rem] opacity-70">
                     (score {hit.score.toFixed(3)})
                   </span>
                 </div>
-                <div className="text-[0.7rem] text-base-content/70 line-clamp-3">
-                  {hit.item.content}
+                <div className="text-[0.7rem] text-base-content/70 line-clamp-3 whitespace-pre-wrap">
+                  {hit.item.text}
                 </div>
-                {hit.item.url && (
-                  <div className="text-[0.7rem] text-info">
-                    {hit.item.url}
-                  </div>
-                )}
               </div>
             ))}
           </div>
