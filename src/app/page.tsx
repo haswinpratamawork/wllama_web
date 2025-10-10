@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useEmbeddingModel } from '@/hooks/useEmbeddingModel';
 import { ChatModelManager } from '@/lib/chatModelManager';
@@ -84,6 +84,56 @@ export default function WllamaUI() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const embeddingDbRef = useRef<IDBDatabase | null>(null);
 
+  const loadKnowledgeBaseCount = useCallback(() => {
+    if (!embeddingDbRef.current) return;
+
+    const transaction = embeddingDbRef.current.transaction(['embeddings'], 'readonly');
+    const objectStore = transaction.objectStore('embeddings');
+    const request = objectStore.count();
+
+    request.onsuccess = () => {
+      setKnowledgeBaseCount(request.result);
+    };
+  }, []);
+
+  const initEmbeddingDB = useCallback(() => {
+    const request = indexedDB.open('VectorDB', 2);
+
+    request.onsuccess = (event) => {
+      embeddingDbRef.current = (event.target as IDBOpenDBRequest).result;
+      loadKnowledgeBaseCount();
+    };
+
+    request.onerror = () => {
+      console.error('Failed to open embedding database');
+    };
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains('embeddings')) {
+        db.createObjectStore('embeddings', { keyPath: 'id' });
+      }
+    };
+  }, [loadKnowledgeBaseCount]);
+
+  const loadCachedModels = useCallback(async () => {
+    try {
+      const WllamaModule = await import('@wllama/wllama/esm/index.js');
+      const { ModelManager } = WllamaModule;
+      const manager = new ModelManager();
+      const models = await manager.getModels();
+      setCachedModels(
+        models.map((m: any) => ({
+          url: m.url,
+          size: m.size,
+          name: m.url.split('/').pop()?.replace('.gguf', '') || 'Unknown',
+        })),
+      );
+    } catch (err) {
+      console.error('Failed to load cached models:', err);
+    }
+  }, []);
+
   useEffect(() => {
     const savedConversations = localStorage.getItem('wllama-conversations');
     if (savedConversations) {
@@ -131,7 +181,7 @@ export default function WllamaUI() {
     return () => {
       window.removeEventListener('chat-model-changed', handleModelChange);
     };
-  }, []);
+  }, [loadCachedModels, initEmbeddingDB]);
 
   useEffect(() => {
     if (conversations.length > 0) {
@@ -155,39 +205,6 @@ export default function WllamaUI() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
-
-  const initEmbeddingDB = () => {
-    const request = indexedDB.open('VectorDB', 2);
-
-    request.onsuccess = (event) => {
-      embeddingDbRef.current = (event.target as IDBOpenDBRequest).result;
-      loadKnowledgeBaseCount();
-    };
-
-    request.onerror = () => {
-      console.error('Failed to open embedding database');
-    };
-
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains('embeddings')) {
-        const objectStore = db.createObjectStore('embeddings', { keyPath: 'id' });
-        // objectStore.createIndex('timestamp', 'metadata.timestamp', { unique: false });
-      }
-    };
-  };
-
-  const loadKnowledgeBaseCount = () => {
-    if (!embeddingDbRef.current) return;
-
-    const transaction = embeddingDbRef.current.transaction(['embeddings'], 'readonly');
-    const objectStore = transaction.objectStore('embeddings');
-    const request = objectStore.count();
-
-    request.onsuccess = () => {
-      setKnowledgeBaseCount(request.result);
-    };
-  };
 
   const cosineSimilarity = (a: number[], b: number[]): number => {
     let dotProduct = 0;
@@ -267,22 +284,6 @@ export default function WllamaUI() {
         }
       }
       return [];
-    }
-  };
-
-  const loadCachedModels = async () => {
-    try {
-      const WllamaModule = await import('@wllama/wllama/esm/index.js');
-      const { ModelManager } = WllamaModule;
-      const manager = new ModelManager();
-      const models = await manager.getModels();
-      setCachedModels(models.map((m: any) => ({
-        url: m.url,
-        size: m.size,
-        name: m.url.split('/').pop()?.replace('.gguf', '') || 'Unknown'
-      })));
-    } catch (err) {
-      console.error('Failed to load cached models:', err);
     }
   };
 
@@ -1032,14 +1033,14 @@ export default function WllamaUI() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex">
-      <div className={`${sidebarOpen ? 'w-64' : 'w-0'} transition-all duration-300 bg-slate-950/50 backdrop-blur-lg border-r border-white/10 flex flex-col overflow-hidden`}>
+    <div className="min-h-screen bg-gradient-to-br from-blue-950 via-blue-900 to-blue-800 flex">
+      <div className={`${sidebarOpen ? 'w-64' : 'w-0'} transition-all duration-300 bg-blue-950/40 backdrop-blur-lg border-r border-white/10 flex flex-col overflow-hidden`}>
         <div className="p-4 border-b border-white/10">
           <h2 className="text-white font-bold text-lg mb-3">Wllama RAG</h2>
           <button
             onClick={createNewConversation}
             disabled={!modelLoaded}
-            className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
+            className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
           >
             <Plus className="w-4 h-4" />
             New conversation
@@ -1053,7 +1054,7 @@ export default function WllamaUI() {
           </button>
           <button 
             onClick={() => router.push('/embedding')}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
+            className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2"
           >
             <Database className="w-4 h-4" />
             Vector Embeddings
@@ -1069,7 +1070,7 @@ export default function WllamaUI() {
                 onClick={handleRAGToggle}
                 disabled={!modelLoaded || (useRAG && knowledgeBaseCount === 0)}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  useRAG ? 'bg-green-600' : 'bg-gray-600'
+                  useRAG ? 'bg-blue-600' : 'bg-gray-600'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 <span
@@ -1082,7 +1083,7 @@ export default function WllamaUI() {
             
             {embeddingModelLoaded ? (
               <>
-                <p className="text-xs text-green-200 mb-1 flex items-center gap-1">
+                <p className="text-xs text-blue-100 mb-1 flex items-center gap-1">
                   <Sparkles className="w-3 h-3" />
                   Embedding model ready
                 </p>
@@ -1090,14 +1091,14 @@ export default function WllamaUI() {
                   Knowledge: {knowledgeBaseCount} documents
                 </p>
                 {embeddingModelCapabilities && (
-                  <p className="text-xs text-purple-200">
+                  <p className="text-xs text-blue-100">
                     {embeddingModelCapabilities.n_embd}D vectors
                   </p>
                 )}
               </>
             ) : (
               <>
-                <p className="text-xs text-yellow-200 mb-2">
+                <p className="text-xs text-orange-200 mb-2">
                   ⚠️ No embedding model loaded
                 </p>
                 <button
@@ -1106,7 +1107,7 @@ export default function WllamaUI() {
                     setModelManagerTab('embedding');
                   }}
                   disabled={!modelLoaded}
-                  className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 text-white text-xs font-semibold py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
+                  className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 text-white text-xs font-semibold py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
                 >
                   <Download className="w-3 h-3" />
                   Load in Model Manager
@@ -1116,7 +1117,7 @@ export default function WllamaUI() {
             
             {useRAG && embeddingModelLoaded && (
               <div className="mt-2">
-                <label className="text-xs text-purple-200 block mb-1">
+                <label className="text-xs text-blue-100 block mb-1">
                   Top K: {ragTopK}
                 </label>
                 <input
@@ -1138,16 +1139,16 @@ export default function WllamaUI() {
             <div
               key={conv.id}
               className={`group relative mb-1 p-3 rounded-lg cursor-pointer transition-colors ${currentConversationId === conv.id
-                ? 'bg-purple-600/30 border border-purple-500/50'
+                ? 'bg-orange-500/30 border border-orange-400/40'
                 : 'bg-white/5 hover:bg-white/10'
                 }`}
               onClick={() => setCurrentConversationId(conv.id)}
             >
               <div className="flex items-start gap-2">
-                <MessageSquare className="w-4 h-4 text-purple-300 flex-shrink-0 mt-1" />
+                <MessageSquare className="w-4 h-4 text-blue-200 flex-shrink-0 mt-1" />
                 <div className="flex-1 min-w-0">
                   <p className="text-white text-sm truncate">{conv.title}</p>
-                  <p className="text-purple-300 text-xs">
+                  <p className="text-blue-200 text-xs">
                     {conv.messages.length} messages
                   </p>
                 </div>
@@ -1156,7 +1157,7 @@ export default function WllamaUI() {
                     e.stopPropagation();
                     deleteConversation(conv.id);
                   }}
-                  className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity"
+                  className="opacity-0 group-hover:opacity-100 text-orange-400 hover:text-orange-300 transition-opacity"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -1181,11 +1182,11 @@ export default function WllamaUI() {
 
             <div className="p-6">
               <div className="mb-6">
-                <div className="flex items-center gap-4 p-4 bg-purple-500/10 border border-purple-500/30 rounded-lg">
-                  <Database className="w-6 h-6 text-purple-300" />
+                <div className="flex items-center gap-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                  <Database className="w-6 h-6 text-blue-200" />
                   <div className="flex-1">
                     <h3 className="text-white font-semibold">Centralized Model Management</h3>
-                    <p className="text-purple-200 text-sm">Load and manage both chat and embedding models in one place</p>
+                    <p className="text-blue-100 text-sm">Load and manage both chat and embedding models in one place</p>
                   </div>
                 </div>
               </div>
@@ -1195,8 +1196,8 @@ export default function WllamaUI() {
                   onClick={() => setModelManagerTab('chat')}
                   className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                     modelManagerTab === 'chat'
-                      ? 'bg-purple-600 text-white'
-                      : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                      ? 'bg-orange-500 text-white'
+                      : 'bg-white/10 text-blue-100 hover:bg-white/20'
                   }`}
                 >
                   <MessageSquare className="w-5 h-5" />
@@ -1217,8 +1218,8 @@ export default function WllamaUI() {
                   onClick={() => setModelManagerTab('cached')}
                   className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                     modelManagerTab === 'cached'
-                      ? 'bg-green-600 text-white'
-                      : 'bg-white/10 text-green-200 hover:bg-white/20'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white/10 text-blue-100 hover:bg-white/20'
                   }`}
                 >
                   <HardDrive className="w-5 h-5" />
@@ -1240,18 +1241,18 @@ export default function WllamaUI() {
                   </div>
 
                   {modelLoaded && (
-                    <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                    <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-green-300 font-semibold flex items-center gap-2">
+                          <p className="text-orange-200 font-semibold flex items-center gap-2">
                             <Check className="w-4 h-4" />
                             Chat model loaded
                           </p>
-                          <p className="text-green-200 text-sm">Ready for conversations</p>
+                          <p className="text-blue-100 text-sm">Ready for conversations</p>
                         </div>
                         <button
                           onClick={unloadChatModel}
-                          className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm"
+                          className="bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded-lg text-sm"
                         >
                           Unload
                         </button>
@@ -1264,8 +1265,8 @@ export default function WllamaUI() {
                       onClick={() => setLoadMethod('url')}
                       className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                         loadMethod === 'url'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-white/10 text-blue-100 hover:bg-white/20'
                       }`}
                     >
                       <Globe className="w-4 h-4" />
@@ -1275,8 +1276,8 @@ export default function WllamaUI() {
                       onClick={() => setLoadMethod('file')}
                       className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                         loadMethod === 'file'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-white/10 text-blue-100 hover:bg-white/20'
                       }`}
                     >
                       <Upload className="w-4 h-4" />
@@ -1286,8 +1287,8 @@ export default function WllamaUI() {
                       onClick={() => setLoadMethod('split')}
                       className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                         loadMethod === 'split'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-white/10 text-blue-100 hover:bg-white/20'
                       }`}
                     >
                       <FileStack className="w-4 h-4" />
@@ -1305,11 +1306,11 @@ export default function WllamaUI() {
                         value={modelUrl}
                         onChange={(e) => handleRepoInputChange(e.target.value)}
                         placeholder="e.g., ggml-org/gemma-2-2b-it-GGUF"
-                        className="w-full bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 mb-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        className="w-full bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
 
                       {fetchingFiles && (
-                        <div className="flex items-center gap-2 text-purple-300 mb-3">
+                        <div className="flex items-center gap-2 text-blue-200 mb-3">
                           <Loader2 className="w-4 h-4 animate-spin" />
                           <span className="text-sm">Fetching repository files...</span>
                         </div>
@@ -1317,13 +1318,13 @@ export default function WllamaUI() {
 
                       {availableFiles.length > 0 && (
                         <div className="mb-3">
-                          <label className="block text-purple-200 text-sm mb-2">
+                          <label className="block text-blue-100 text-sm mb-2">
                             Select a GGUF file ({availableFiles.length} available)
                           </label>
                           <select
                             value={selectedFile}
                             onChange={(e) => setSelectedFile(e.target.value)}
-                            className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                            className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           >
                             <option value="">Choose a file...</option>
                             {availableFiles.map((file) => (
@@ -1338,7 +1339,7 @@ export default function WllamaUI() {
                       <button
                         onClick={() => loadModelFromUrl(modelUrl)}
                         disabled={(!selectedFile && availableFiles.length > 0) || isLoading || !modelUrl}
-                        className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                       >
                         {isLoading ? (
                           <>
@@ -1370,20 +1371,20 @@ export default function WllamaUI() {
                       />
                       <button
                         onClick={() => fileInputRef.current?.click()}
-                        className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
+                        className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
                       >
                         <Upload className="w-5 h-5" />
                         Choose File
                       </button>
                       {modelFile && (
-                        <p className="text-green-300 text-sm mb-3">
+                        <p className="text-orange-200 text-sm mb-3">
                           Selected: {modelFile.length} file(s)
                         </p>
                       )}
                       <button
                         onClick={() => loadModelFromFile()}
                         disabled={!modelFile || isLoading}
-                        className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                       >
                         {isLoading ? (
                           <>
@@ -1403,7 +1404,7 @@ export default function WllamaUI() {
                   {loadMethod === 'split' && (
                     <div className="mb-6">
                       <div className="flex items-center gap-2 mb-4">
-                        <FileStack className="w-5 h-5 text-purple-300" />
+                        <FileStack className="w-5 h-5 text-blue-200" />
                         <h3 className="text-white font-semibold">Load Split Model</h3>
                       </div>
 
@@ -1412,8 +1413,8 @@ export default function WllamaUI() {
                           onClick={() => setSplitLoadMethod('local')}
                           className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                             splitLoadMethod === 'local'
-                              ? 'bg-purple-600 text-white'
-                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-white/10 text-blue-100 hover:bg-white/20'
                           }`}
                         >
                           <Upload className="w-4 h-4" />
@@ -1423,8 +1424,8 @@ export default function WllamaUI() {
                           onClick={() => setSplitLoadMethod('url')}
                           className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                             splitLoadMethod === 'url'
-                              ? 'bg-purple-600 text-white'
-                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-white/10 text-blue-100 hover:bg-white/20'
                           }`}
                         >
                           <Globe className="w-4 h-4" />
@@ -1434,7 +1435,7 @@ export default function WllamaUI() {
 
                       {splitLoadMethod === 'local' && (
                         <div>
-                          <label className="block text-purple-200 text-sm mb-2">
+                          <label className="block text-blue-100 text-sm mb-2">
                             Select all split model files (sorted automatically)
                           </label>
                           <input
@@ -1448,7 +1449,7 @@ export default function WllamaUI() {
                           <button
                             onClick={() => splitFileInputRef.current?.click()}
                             disabled={isLoading}
-                            className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
+                            className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
                           >
                             <Upload className="w-5 h-5" />
                             Choose Split Files
@@ -1456,10 +1457,10 @@ export default function WllamaUI() {
 
                           {splitFiles.length > 0 && (
                             <div className="bg-white/5 border border-white/10 rounded-lg p-3 mb-3">
-                              <p className="text-green-300 text-sm font-semibold mb-2">
+                              <p className="text-orange-200 text-sm font-semibold mb-2">
                                 {splitFiles.length} file(s) selected:
                               </p>
-                              <ul className="text-purple-200 text-xs space-y-1 max-h-32 overflow-y-auto">
+                              <ul className="text-blue-100 text-xs space-y-1 max-h-32 overflow-y-auto">
                                 {splitFiles.map((file, idx) => (
                                   <li key={idx} className="truncate">
                                     {idx + 1}. {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
@@ -1472,7 +1473,7 @@ export default function WllamaUI() {
                           <button
                             onClick={() => loadSplitModel(splitFiles)}
                             disabled={splitFiles.length === 0 || isLoading}
-                            className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                           >
                             {isLoading ? (
                               <>
@@ -1491,7 +1492,7 @@ export default function WllamaUI() {
 
                       {splitLoadMethod === 'url' && (
                         <div>
-                          <label className="block text-purple-200 text-sm mb-2">
+                          <label className="block text-blue-100 text-sm mb-2">
                             Enter URLs for each split (in order)
                           </label>
                           
@@ -1503,14 +1504,14 @@ export default function WllamaUI() {
                                   value={url}
                                   onChange={(e) => updateSplitUrl(idx, e.target.value)}
                                   placeholder={`Split ${idx + 1} URL`}
-                                  className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                  className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                                   disabled={isLoading}
                                 />
                                 {splitUrls.length > 1 && (
                                   <button
                                     onClick={() => removeSplitUrl(idx)}
                                     disabled={isLoading}
-                                    className="bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white px-3 rounded-lg transition-colors"
+                                    className="bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 text-white px-3 rounded-lg transition-colors"
                                   >
                                     ✕
                                   </button>
@@ -1530,7 +1531,7 @@ export default function WllamaUI() {
                           <button
                             onClick={loadSplitFromUrls}
                             disabled={splitUrls.filter(u => u.trim()).length === 0 || isLoading}
-                            className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                           >
                             {isLoading ? (
                               <>
@@ -1550,7 +1551,7 @@ export default function WllamaUI() {
                   )}
 
                   <div className="bg-white/5 border border-white/10 rounded-lg p-4">
-                    <label className="block text-purple-200 text-sm mb-2">
+                    <label className="block text-blue-100 text-sm mb-2">
                       Context Size: {nCtx}
                     </label>
                     <input
@@ -1569,7 +1570,7 @@ export default function WllamaUI() {
                       <select
                         value={chatTemplate}
                         onChange={(e) => setChatTemplate(e.target.value as any)}
-                        className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        className="w-full bg-white/10 border border-white/20 text-white rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
                         <option value="gemma">Gemma (Google)</option>
                         <option value="qwen">Qwen (Alibaba)</option>
@@ -1595,14 +1596,14 @@ export default function WllamaUI() {
                   </div>
 
                   {embeddingModelLoaded && (
-                    <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                    <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
                       <div className="flex items-center justify-between mb-2">
                         <div>
-                          <p className="text-green-300 font-semibold flex items-center gap-2">
+                          <p className="text-orange-200 font-semibold flex items-center gap-2">
                             <Check className="w-4 h-4" />
                             Embedding model loaded
                           </p>
-                          <p className="text-green-200 text-sm">Ready for RAG and semantic search</p>
+                          <p className="text-blue-100 text-sm">Ready for RAG and semantic search</p>
                         </div>
                         <button
                           onClick={() => {
@@ -1610,7 +1611,7 @@ export default function WllamaUI() {
                               unloadEmbeddingModel();
                             }
                           }}
-                          className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm"
+                          className="bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded-lg text-sm"
                         >
                           Unload
                         </button>
@@ -1643,7 +1644,7 @@ export default function WllamaUI() {
                         await loadEmbeddingModel(embeddingModelUrl);
                       }}
                       disabled={loadingEmbeddingModel || embeddingModelLoaded || !embeddingModelUrl || embeddingModelDownloading}
-                      className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+                      className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
                     >
                       {loadingEmbeddingModel ? (
                         <>
@@ -1683,7 +1684,7 @@ export default function WllamaUI() {
                           loadingEmbeddingModel ||
                           embeddingModelDownloading
                         }
-                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                        className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                       >
                         {embeddingModelDownloading ? (
                           <>
@@ -1711,7 +1712,7 @@ export default function WllamaUI() {
                           <p className="text-blue-200 text-xs">Load an embedding model directly from your device</p>
                         </div>
                         {embeddingModelFiles.length > 0 && (
-                          <span className="text-green-300 text-xs">
+                          <span className="text-orange-200 text-xs">
                             {embeddingModelFiles.length} file(s)
                           </span>
                         )}
@@ -1728,7 +1729,7 @@ export default function WllamaUI() {
                         <button
                           type="button"
                           onClick={() => embeddingFileInputRef.current?.click()}
-                          className="flex-1 min-w-[140px] bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                          className="flex-1 min-w-[140px] bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                         >
                           <Upload className="w-4 h-4" />
                           Choose Files
@@ -1747,7 +1748,7 @@ export default function WllamaUI() {
                             }
                           }}
                           disabled={loadingEmbeddingModel || embeddingModelLoaded || embeddingModelDownloading}
-                          className="flex-1 min-w-[170px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                          className="flex-1 min-w-[170px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                         >
                           {loadingEmbeddingModel ? (
                             <>
@@ -1786,7 +1787,7 @@ export default function WllamaUI() {
 
                     <div className="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">
                       <div className="flex items-center gap-2">
-                        <FileStack className="w-4 h-4 text-purple-300" />
+                        <FileStack className="w-4 h-4 text-blue-200" />
                         <p className="text-white font-semibold">Load Split GGUF</p>
                       </div>
                       <p className="text-blue-200 text-xs">
@@ -1798,8 +1799,8 @@ export default function WllamaUI() {
                           onClick={() => setEmbeddingSplitLoadMethod('local')}
                           className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                             embeddingSplitLoadMethod === 'local'
-                              ? 'bg-purple-600 text-white'
-                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-white/10 text-blue-100 hover:bg-white/20'
                           }`}
                           disabled={loadingEmbeddingModel || embeddingModelDownloading}
                         >
@@ -1811,8 +1812,8 @@ export default function WllamaUI() {
                           onClick={() => setEmbeddingSplitLoadMethod('url')}
                           className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${
                             embeddingSplitLoadMethod === 'url'
-                              ? 'bg-purple-600 text-white'
-                              : 'bg-white/10 text-purple-200 hover:bg-white/20'
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-white/10 text-blue-100 hover:bg-white/20'
                           }`}
                           disabled={loadingEmbeddingModel || embeddingModelDownloading}
                         >
@@ -1834,7 +1835,7 @@ export default function WllamaUI() {
                           <button
                             type="button"
                             onClick={() => embeddingSplitFileInputRef.current?.click()}
-                            className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                             disabled={loadingEmbeddingModel || embeddingModelDownloading}
                           >
                             <Upload className="w-4 h-4" />
@@ -1855,7 +1856,7 @@ export default function WllamaUI() {
                                 embeddingModelDownloading ||
                                 embeddingSplitFiles.length === 0
                               }
-                              className="flex-1 min-w-[160px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                              className="flex-1 min-w-[160px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                             >
                               {loadingEmbeddingModel ? (
                                 <>
@@ -1893,7 +1894,7 @@ export default function WllamaUI() {
                                   value={url}
                                   onChange={(e) => updateEmbeddingSplitUrl(index, e.target.value)}
                                   placeholder={`https://...split-${index + 1}.gguf`}
-                                  className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                  className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                                   disabled={loadingEmbeddingModel || embeddingModelDownloading}
                                 />
                                 {embeddingSplitUrls.length > 1 && (
@@ -1912,7 +1913,7 @@ export default function WllamaUI() {
                           <button
                             type="button"
                             onClick={addEmbeddingSplitUrl}
-                            className="w-full bg-white/10 hover:bg-white/20 text-purple-200 font-semibold py-2 px-4 rounded-lg transition-colors"
+                            className="w-full bg-white/10 hover:bg-white/20 text-blue-100 font-semibold py-2 px-4 rounded-lg transition-colors"
                             disabled={loadingEmbeddingModel || embeddingModelDownloading}
                           >
                             Add Another URL
@@ -1926,7 +1927,7 @@ export default function WllamaUI() {
                                 embeddingModelDownloading ||
                                 embeddingSplitUrls.every((url) => url.trim() === '')
                               }
-                              className="flex-1 min-w-[160px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                              className="flex-1 min-w-[160px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
                             >
                               {loadingEmbeddingModel ? (
                                 <>
@@ -1960,7 +1961,7 @@ export default function WllamaUI() {
                     )}
 
                     {embeddingModelError && (
-                      <p className="text-red-300 text-sm whitespace-pre-wrap">{embeddingModelError}</p>
+                      <p className="text-orange-200 text-sm whitespace-pre-wrap">{embeddingModelError}</p>
                     )}
                   </div>
                 </div>
@@ -1968,11 +1969,11 @@ export default function WllamaUI() {
 
               {modelManagerTab === 'cached' && (
                 <div>
-                  <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
-                    <p className="text-green-200 text-sm mb-2">
+                  <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                    <p className="text-blue-100 text-sm mb-2">
                       <strong>💾 Cached Models:</strong> Models stored in browser cache
                     </p>
-                    <ul className="text-green-200 text-xs space-y-1 list-disc list-inside">
+                    <ul className="text-blue-100 text-xs space-y-1 list-disc list-inside">
                       <li>Instantly load previously downloaded models</li>
                       <li>No re-download required</li>
                       <li>Clear cache to free up space or reload fresh models</li>
@@ -1997,7 +1998,7 @@ export default function WllamaUI() {
                               }
                             }
                           }}
-                          className="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2"
+                          className="bg-orange-600 hover:bg-orange-700 text-white text-sm font-semibold py-2 px-4 rounded-lg transition-colors flex items-center gap-2"
                         >
                           <Trash2 className="w-4 h-4" />
                           Clear All Cache
@@ -2012,7 +2013,7 @@ export default function WllamaUI() {
                           >
                             <div className="flex-1 min-w-0">
                               <p className="text-white font-medium truncate">{model.name}</p>
-                              <p className="text-purple-300 text-xs">
+                              <p className="text-blue-200 text-xs">
                                 Size: {(model.size / 1024 / 1024).toFixed(1)} MB
                               </p>
                             </div>
@@ -2027,13 +2028,13 @@ export default function WllamaUI() {
                               <button
                                 onClick={() => loadEmbeddingModel(model.url)}
                                 disabled={loadingEmbeddingModel}
-                                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm whitespace-nowrap"
+                                className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm whitespace-nowrap"
                               >
                                 Load as Embedding
                               </button>
                               <button
                                 onClick={() => deleteCachedModel(model.url)}
-                                className="bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg"
+                                className="bg-orange-600 hover:bg-orange-700 text-white p-2 rounded-lg"
                                 title="Delete from cache"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -2065,7 +2066,7 @@ export default function WllamaUI() {
                 {currentConversation?.title || 'Wllama RAG Chatbot'}
                 {useRAG && <Sparkles className="w-5 h-5 text-yellow-400" />}
               </h1>
-              <p className="text-purple-200 text-sm">
+              <p className="text-blue-100 text-sm">
                 {modelLoaded ? (
                   useRAG ? `RAG Mode: ${knowledgeBaseCount} docs ready` : 'Model loaded - Ready to chat'
                 ) : 'Load a model to start'}
@@ -2081,20 +2082,20 @@ export default function WllamaUI() {
         )}
 
         {error && (
-          <div className="bg-red-500/20 border-b border-red-400/50 text-red-100 px-6 py-3">
+          <div className="bg-orange-500/20 border-b border-orange-400/50 text-orange-100 px-6 py-3">
             {error}
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 && modelLoaded && (
-            <div className="text-center text-purple-300 py-12">
+            <div className="text-center text-blue-200 py-12">
               <Bot className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <p className="text-lg">Start a conversation!</p>
               <p className="text-sm mt-2">Type a message below to begin chatting.</p>
               {useRAG && knowledgeBaseCount > 0 && (
-                <div className="mt-4 inline-block bg-green-500/10 border border-green-500/30 rounded-lg px-4 py-2">
-                  <p className="text-green-300 text-sm flex items-center gap-2">
+                <div className="mt-4 inline-block bg-blue-500/10 border border-blue-500/30 rounded-lg px-4 py-2">
+                  <p className="text-orange-200 text-sm flex items-center gap-2">
                     <Sparkles className="w-4 h-4" />
                     RAG enabled with {knowledgeBaseCount} documents
                   </p>
@@ -2104,13 +2105,13 @@ export default function WllamaUI() {
           )}
 
           {!modelLoaded && (
-            <div className="text-center text-purple-300 py-12">
+            <div className="text-center text-blue-200 py-12">
               <HardDrive className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <p className="text-lg">No model loaded</p>
               <p className="text-sm mt-2 mb-4">Click Manage models to get started</p>
               <button
                 onClick={() => setShowModelManager(true)}
-                className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-lg transition-colors"
+                className="bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2 px-6 rounded-lg transition-colors"
               >
                 Open Model Manager
               </button>
@@ -2123,14 +2124,14 @@ export default function WllamaUI() {
                 className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 {message.role === 'assistant' && (
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center">
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-orange-500 flex items-center justify-center">
                     <Bot className="w-5 h-5 text-white" />
                   </div>
                 )}
 
                 <div
                   className={`max-w-[70%] rounded-2xl p-4 ${message.role === 'user'
-                    ? 'bg-purple-600 text-white'
+                    ? 'bg-orange-500 text-white'
                     : 'bg-white/10 text-white border border-white/20'
                     }`}
                 >
@@ -2141,7 +2142,7 @@ export default function WllamaUI() {
                 </div>
 
                 {message.role === 'user' && (
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-pink-600 flex items-center justify-center">
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-orange-500 flex items-center justify-center">
                     <User className="w-5 h-5 text-white" />
                   </div>
                 )}
@@ -2149,14 +2150,14 @@ export default function WllamaUI() {
 
               {message.role === 'user' && message.ragContext && message.ragContext.length > 0 && (
                 <div className="ml-11 mt-2 max-w-[70%]">
-                  <details className="bg-green-500/10 border border-green-500/30 rounded-lg p-3">
-                    <summary className="text-green-300 text-xs cursor-pointer flex items-center gap-2">
+                  <details className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+                    <summary className="text-orange-200 text-xs cursor-pointer flex items-center gap-2">
                       <BookOpen className="w-3 h-3" />
                       Retrieved {message.ragContext.length} relevant documents
                     </summary>
                     <div className="mt-2 space-y-2">
                       {message.ragContext.map((ctx, idx) => (
-                        <div key={idx} className="text-green-200 text-xs bg-white/5 rounded p-2">
+                        <div key={idx} className="text-blue-100 text-xs bg-white/5 rounded p-2">
                           {ctx.substring(0, 150)}...
                         </div>
                       ))}
@@ -2169,7 +2170,7 @@ export default function WllamaUI() {
 
           {isGenerating && (
             <div className="flex gap-3 justify-start">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center">
+              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-orange-500 flex items-center justify-center">
                 <Bot className="w-5 h-5 text-white" />
               </div>
               <div className="bg-white/10 text-white border border-white/20 rounded-2xl p-4">
@@ -2191,13 +2192,13 @@ export default function WllamaUI() {
                 onKeyDown={handleKeyPress}
                 placeholder={modelLoaded ? "Type your message..." : "Load a model first..."}
                 disabled={!modelLoaded || isGenerating}
-                className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 min-h-[60px] max-h-[200px] focus:outline-none focus:ring-2 focus:ring-purple-500 resize-none disabled:opacity-50"
+                className="flex-1 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-lg p-3 min-h-[60px] max-h-[200px] focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none disabled:opacity-50"
                 rows={2}
               />
               <button
                 onClick={sendMessage}
                 disabled={!modelLoaded || isGenerating || !input.trim()}
-                className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:from-gray-600 disabled:to-gray-600 disabled:cursor-not-allowed text-white font-bold p-4 rounded-lg transition-all flex items-center justify-center shadow-lg"
+                className="bg-gradient-to-r from-blue-600 to-orange-500 hover:from-blue-700 hover:to-orange-600 disabled:from-gray-600 disabled:to-gray-600 disabled:cursor-not-allowed text-white font-bold p-4 rounded-lg transition-all flex items-center justify-center shadow-lg"
               >
                 <Send className="w-5 h-5" />
               </button>
@@ -2213,12 +2214,12 @@ export default function WllamaUI() {
               )}
             </div>
             <div className="flex items-center justify-between mt-2">
-              <p className="text-xs text-purple-300">
+              <p className="text-xs text-blue-200">
                 Press Enter to send
-                {useRAG && <span className="text-green-300"> • RAG Active</span>}
+                {useRAG && <span className="text-orange-200"> • RAG Active</span>}
               </p>
               {conversations.length > 0 && (
-                <p className="text-xs text-green-300 flex items-center gap-1">
+                <p className="text-xs text-orange-200 flex items-center gap-1">
                   <Save className="w-3 h-3" />
                   Auto-saved
                 </p>
@@ -2230,3 +2231,8 @@ export default function WllamaUI() {
     </div>
   );
 }
+
+
+
+
+
