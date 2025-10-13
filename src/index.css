@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
+/* body {
   @apply bg-base-300;
 }
 
@@ -16,5 +16,16 @@ body {
     li {
       @apply mb-2;
     }
+  }
+} */
+
+body {
+  @apply bg-sky-900 text-white;
+}
+
+ul {
+  @apply list-disc pl-4 mt-4 text-orange-400;
+  li {
+    @apply mb-2 marker:text-orange-500;
   }
 }

@@ -329,19 +329,19 @@ export default function EmbeddingPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[oklch(0.15_0.03_260)] text-[oklch(0.9_0.02_260)] transition-colors duration-200 p-6 md:p-10">
+    <div className="min-h-screen bg-sky-900 text-white transition-colors duration-200 p-6 md:p-10">
       <div className="max-w-5xl mx-auto space-y-6 md:space-y-10">
-        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[oklch(0.3_0.12_270)] text-[oklch(0.98_0.02_260)] text-sm font-medium hover:opacity-95">
+        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-300 transition">
           <Link to="/">Kembali ke Chat</Link>
         </div>
 
-        <div className="bg-[oklch(0.18_0.04_260)] shadow-lg rounded-2xl border border-[oklch(0.25_0.04_260)] overflow-hidden transition-colors">
+        <div className="bg-sky-800 shadow-lg rounded-2xl border border-sky-700 overflow-hidden transition-colors">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between p-6 md:p-8">
             <div>
-              <h1 className="text-2xl md:text-3xl font-semibold text-[oklch(0.95_0.02_260)]">
+              <h1 className="text-2xl md:text-3xl font-semibold text-white">
                 Embedding & Knowledge Base
               </h1>
-              <p className="text-sm text-[oklch(0.7_0.02_260)] mt-1">
+              <p className="text-sm text-sky-300 mt-1">
                 Kelola model embedding Gemma dan knowledge untuk RAG lokal.
               </p>
             </div>
@@ -361,10 +361,10 @@ export default function EmbeddingPage() {
             </div>
           </div>
 
-          <div className="p-6 md:p-8 border-t border-[oklch(0.25_0.04_260)] space-y-8">
+          <div className="p-6 md:p-8 border-t border-sky-700 space-y-8">
             <section className="space-y-4">
               <div className="flex items-center justify-between flex-wrap gap-3">
-                <h2 className="text-xl font-semibold text-[oklch(0.95_0.02_260)]">
+                <h2 className="text-xl font-semibold text-white">
                   Performance Monitor
                 </h2>
                 <div className="text-xs text-[oklch(0.7_0.02_260)]">
@@ -389,19 +389,19 @@ export default function EmbeddingPage() {
                     return (
                       <div
                         key={key}
-                        className="p-4 bg-[oklch(0.2_0.05_260)] border border-[oklch(0.25_0.04_260)] rounded-lg space-y-2"
+                        className="p-4 bg-sky-950 border border-sky-800 rounded-lg space-y-2"
                       >
-                        <div className="text-xs uppercase tracking-wide text-[oklch(0.7_0.02_260)]">
+                        <div className="text-xs uppercase tracking-wide text-sky-400">
                           {getPerfLabel(key)}
                         </div>
-                        <div className="text-2xl font-semibold text-[oklch(0.95_0.02_260)]">
+                        <div className="text-2xl font-semibold text-white">
                           {formatDurationMs(event.durationMs)}
                         </div>
-                        <div className="text-[0.7rem] text-[oklch(0.65_0.02_260)]">
+                        <div className="text-[0.7rem] text-sky-400">
                           Update {formatDate(event.wallClock)}
                         </div>
                         {metaEntries.length > 0 && (
-                          <div className="text-[0.65rem] text-[oklch(0.7_0.02_260)] space-y-1">
+                          <div className="list-disc pl-5 text-orange-400 text-xs">
                             {metaEntries.map((entry) => (
                               <div key={entry}>{entry}</div>
                             ))}
@@ -412,20 +412,20 @@ export default function EmbeddingPage() {
                   })}
                 </div>
               ) : (
-                <div className="text-sm text-[oklch(0.7_0.02_260)] border border-dashed border-[oklch(0.25_0.04_260)] rounded-lg p-4">
+                <div className="text-sm text-sky-300 border border-dashed border-sky-700 rounded-lg p-4">
                   Belum ada data performa yang terekam. Lakukan operasi seperti menambah knowledge atau menjalankan RAG untuk mulai mengumpulkan data.
                 </div>
               )}
 
               {recentEvents.length > 0 && (
                 <div className="space-y-2">
-                  <div className="text-sm font-medium text-[oklch(0.9_0.02_260)]">
+                  <div className="text-sm font-medium text-white">
                     Riwayat terbaru
                   </div>
-                  <div className="overflow-auto border border-[oklch(0.25_0.04_260)] rounded-lg">
+                  <div className="overflow-auto border border-sky-700 rounded-lg">
                     <table className="table table-xs text-[0.7rem]">
                       <thead>
-                        <tr className="bg-[oklch(0.2_0.05_260)] text-[oklch(0.75_0.02_260)]">
+                        <tr className="bg-sky-950 text-sky-300">
                           <th>Waktu</th>
                           <th>Event</th>
                           <th>Durasi</th>
@@ -572,7 +572,7 @@ export default function EmbeddingPage() {
                   />
                   <button
                     type="button"
-                    className="btn btn-sm btn-accent"
+                    className="btn btn-sm bg-orange-500 hover:bg-orange-600 text-white border-none"
                     onClick={() => knowledgeJsonInputRef.current?.click()}
                     disabled={importingKnowledge}
                   >
@@ -608,7 +608,7 @@ export default function EmbeddingPage() {
                   )}
                   <button
                     type="submit"
-                    className="btn btn-sm btn-primary"
+                    className="btn btn-sm bg-orange-500 hover:bg-orange-600 text-white border-none"
                     disabled={savingKnowledge}
                   >
                     {savingKnowledge
@@ -634,7 +634,7 @@ export default function EmbeddingPage() {
                   />
                   <button
                     type="submit"
-                    className="btn btn-sm btn-secondary"
+                    className="btn btn-sm bg-orange-500 hover:bg-orange-600 text-white border-none"
                     disabled={searching}
                   >
                     {searching ? 'Searching...' : 'Search'}
